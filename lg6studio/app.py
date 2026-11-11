@@ -105,6 +105,7 @@ device_mod = _import_optional("device")
 render_mod = _import_optional("render")
 scenes_mod = _import_optional("scenes")
 sysmon_mod = _import_optional("sysmon")
+sensors_mod = _import_optional("sensors")
 settings_mod = _import_optional("settings")
 autostart_mod = _import_optional("autostart")
 tray_mod = _import_optional("tray")
@@ -275,15 +276,60 @@ def friendly_device_error(exc: BaseException) -> str:
     return f"设备操作失败：{text}"
 
 
+_STATIC_LAYER_TYPES = frozenset(("image",))
+_METRIC_PLACEHOLDER = re.compile(r"\{([a-z_0-9]+)\}")
+
+
+def _scene_metrics() -> tuple[str, ...]:
+    """当前可用的指标名列表（传感器模块优先，其次 scenes.py 的白名单）。"""
+    for module in (sensors_mod, scenes_mod):
+        metrics = getattr(module, "METRIC_IDS", None) if module is not None else None
+        if metrics:
+            try:
+                return tuple(str(item) for item in metrics)
+            except TypeError:
+                continue
+    return ("cpu", "ram")
+
+
+_SCENE_METRICS = _scene_metrics()
+
+
+def _text_has_metric_layer(layer: dict) -> bool:
+    """含 ``{metric}`` / ``{time}`` 等占位符的文字图层需要逐帧重算。"""
+    text = str(layer.get("text") or "")
+    if "{" not in text:
+        return False
+    for name in _METRIC_PLACEHOLDER.findall(text):
+        if name in ("time", "date", "uptime") or name in _SCENE_METRICS:
+            return True
+    return False
+
+
 def scene_is_dynamic(scene: dict) -> bool:
-    """时钟/监控/进度条/动图/视频需要逐帧渲染，其余静态场景可 2 秒重推一次。"""
+    """需要逐帧渲染的场景：动图/视频背景，或含动态图层。"""
     background = scene.get("background") or {}
     if isinstance(background, dict) and background.get("type") in ("gif", "video"):
         return True
     for layer in scene.get("layers") or []:
-        if isinstance(layer, dict) and layer.get("type") in ("clock", "sysinfo", "bars"):
+        if not isinstance(layer, dict):
+            continue
+        kind = layer.get("type")
+        if kind in ("clock", "sysinfo", "bars", "chart", "gauge"):
+            return True
+        if kind == "text" and _text_has_metric_layer(layer):
             return True
     return False
+
+
+def _metric_text(metric: str) -> str:
+    """指标的中文名，传感器模块缺失时退回英文 ID。"""
+    if sensors_mod is not None:
+        try:
+            return str(sensors_mod.metric_label(metric))
+        except Exception:  # noqa: BLE001 - 传感器模块的展示名不可用不影响编辑
+            pass
+    return metric.upper()
 
 
 def layer_label(layer: dict) -> str:
@@ -295,9 +341,15 @@ def layer_label(layer: dict) -> str:
     if kind == "clock":
         return f"时钟 · {layer.get('format') or '%H:%M'}"
     if kind == "sysinfo":
-        return "系统监控 · " + "/".join(str(item) for item in layer.get("fields") or ["cpu", "ram"])
+        names = [str(item) for item in layer.get("fields") or ["cpu", "ram"]]
+        return "状态文字 · " + "/".join(_metric_text(item) for item in names)
     if kind == "bars":
-        return "进度条 · " + "/".join(str(item) for item in layer.get("items") or ["cpu", "ram"])
+        names = [str(item) for item in layer.get("items") or ["cpu", "ram"]]
+        return "进度条 · " + "/".join(_metric_text(item) for item in names)
+    if kind == "chart":
+        return f"折线图 · {_metric_text(str(layer.get('metric') or 'cpu'))}"
+    if kind == "gauge":
+        return f"仪表盘 · {_metric_text(str(layer.get('metric') or 'cpu'))}"
     if kind == "image":
         path = str(layer.get("path") or "")
         return f"图片 · {os.path.basename(path) if path else '未选择'}"
@@ -1525,8 +1577,10 @@ class App(tk.Tk):
             (
                 ("＋ 文字", "text"),
                 ("＋ 时钟", "clock"),
-                ("＋ 监控", "sysinfo"),
+                ("＋ 状态", "sysinfo"),
                 ("＋ 进度条", "bars"),
+                ("＋ 折线图", "chart"),
+                ("＋ 仪表盘", "gauge"),
                 ("＋ 图片", "image"),
             )
         ):
@@ -2263,6 +2317,34 @@ class App(tk.Tk):
                 "scale": 0.6,
                 "opacity": 1.0,
             }
+        elif kind == "chart":
+            layer = {
+                "type": "chart",
+                "metric": "cpu",
+                "x": 0.08,
+                "y": 0.55,
+                "w": 0.84,
+                "h": 0.22,
+                "color": "#38BDF8",
+                "color2": "#0EA5E9",
+                "bg": "#0F172A",
+                "label": True,
+                "size": 18,
+            }
+        elif kind == "gauge":
+            layer = {
+                "type": "gauge",
+                "metric": "cpu",
+                "x": 0.5,
+                "y": 0.42,
+                "diameter": 0.55,
+                "thickness": 0.06,
+                "color": "#38BDF8",
+                "track": "#1E293B",
+                "label": True,
+                "size": 20,
+                "value_size": 46,
+            }
         else:
             return
 
@@ -2346,8 +2428,10 @@ class App(tk.Tk):
         type_names = {
             "text": "文字",
             "clock": "时钟",
-            "sysinfo": "系统监控",
+            "sysinfo": "状态文字",
             "bars": "进度条",
+            "chart": "折线图",
+            "gauge": "仪表盘",
             "image": "图片",
         }
         self._label(
@@ -2401,19 +2485,75 @@ class App(tk.Tk):
         elif kind in ("sysinfo", "bars"):
             field_key = "fields" if kind == "sysinfo" else "items"
             self._grid_label(grid, row, "监控项")
-            current = layer.get(field_key) or ["cpu", "ram"]
-            fields_var = tk.StringVar(value=", ".join(str(item) for item in current))
-            entry = ttk.Entry(grid, textvariable=fields_var)
-            entry.grid(row=row, column=1, sticky="ew", pady=2)
+            holder = tk.Frame(grid, bg=CARD)
+            holder.grid(row=row, column=1, sticky="ew", pady=2)
+            current = [str(item) for item in (layer.get(field_key) or ["cpu", "ram"])]
+            summary = self._label(
+                holder,
+                " · ".join(_metric_text(item) for item in current) or "未选择",
+                size=8,
+                color=TEXT,
+            )
+            summary.pack(side="left", fill="x", expand=True)
 
-            def apply_fields(
-                *_args: Any, var: tk.StringVar = fields_var, key: str = field_key
-            ) -> None:
-                items = [part.strip() for part in var.get().split(",") if part.strip()]
-                self._apply_layer_field(key, items or ["cpu", "ram"])
+            def choose_metrics(key: str = field_key) -> None:
+                selected = self._ask_metrics(layer.get(key) or ["cpu", "ram"])
+                if selected is None:
+                    return
+                self._apply_layer_field(key, selected)
+                self._rebuild_layer_editor()
 
-            fields_var.trace_add("write", apply_fields)
+            ttk.Button(holder, text="选择…", style="Small.TButton", command=choose_metrics).pack(
+                side="right"
+            )
             row += 1
+        elif kind in ("chart", "gauge"):
+            self._grid_label(grid, row, "监控指标")
+            metric_var = tk.StringVar(value=_metric_text(str(layer.get("metric") or "cpu")))
+            combo = ttk.Combobox(
+                grid,
+                textvariable=metric_var,
+                values=[_metric_text(item) for item in _SCENE_METRICS],
+                state="readonly",
+            )
+            combo.grid(row=row, column=1, sticky="ew", pady=2)
+
+            def apply_metric(
+                _event: tk.Event | None = None, var: tk.StringVar = metric_var
+            ) -> None:
+                label_to_metric = {_metric_text(item): item for item in _SCENE_METRICS}
+                chosen = label_to_metric.get(var.get())
+                if chosen:
+                    self._apply_layer_field("metric", chosen)
+
+            combo.bind("<<ComboboxSelected>>", apply_metric)
+            row += 1
+            if kind == "chart":
+                self._editor_scale_row(
+                    grid, row, "宽度", _safe_float(layer.get("w"), 0.8, 0.05, 1.0), "w"
+                )
+                row += 1
+                self._editor_scale_row(
+                    grid, row, "高度", _safe_float(layer.get("h"), 0.22, 0.05, 1.0), "h"
+                )
+                row += 1
+            else:
+                self._editor_scale_row(
+                    grid,
+                    row,
+                    "直径",
+                    _safe_float(layer.get("diameter"), 0.5, 0.05, 1.5),
+                    "diameter",
+                )
+                row += 1
+                self._editor_scale_row(
+                    grid,
+                    row,
+                    "环宽",
+                    _safe_float(layer.get("thickness"), 0.06, 0.005, 0.5),
+                    "thickness",
+                )
+                row += 1
         elif kind == "image":
             self._grid_label(grid, row, "图片文件")
             holder = tk.Frame(grid, bg=CARD)
@@ -2496,6 +2636,20 @@ class App(tk.Tk):
                 grid, row, "第二颜色", _norm_color(layer.get("color2"), "#F472B6"), "color2"
             )
             row += 1
+        elif kind == "chart":
+            self._editor_color_row(
+                grid, row, "填充色", _norm_color(layer.get("color2"), "#0EA5E9"), "color2"
+            )
+            row += 1
+            self._editor_color_row(
+                grid, row, "背景色", _norm_color(layer.get("bg"), "#0F172A"), "bg"
+            )
+            row += 1
+        elif kind == "gauge":
+            self._editor_color_row(
+                grid, row, "轨道色", _norm_color(layer.get("track"), "#1E293B"), "track"
+            )
+            row += 1
 
         self._editor_scale_row(grid, row, "位置 X", _safe_float(layer.get("x"), 0.5, 0.0, 1.0), "x")
         row += 1
@@ -2549,6 +2703,67 @@ class App(tk.Tk):
         if label is not None:
             label.configure(text=f"{value:.{digits}f}")
         self._apply_layer_field(key, round(value, digits))
+
+    def _ask_metrics(self, current: list[str]) -> list[str] | None:
+        """弹窗让用户勾选监控项；取消返回 ``None``。"""
+        dialog = tk.Toplevel(self)
+        dialog.title("选择监控项")
+        dialog.configure(bg=BG)
+        dialog.transient(self)
+        dialog.resizable(False, False)
+        body = tk.Frame(dialog, bg=BG)
+        body.pack(fill="both", expand=True, padx=16, pady=14)
+        self._label(
+            body,
+            "勾选要显示的指标（最多 8 项，按勾选顺序排列）：",
+            size=9,
+            color=MUTED,
+            bg=BG,
+            wrap=360,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        variables: dict[str, tk.BooleanVar] = {}
+        for index, metric in enumerate(_SCENE_METRICS):
+            var = tk.BooleanVar(value=metric in current)
+            variables[metric] = var
+            tk.Checkbutton(
+                body,
+                text=f"{_metric_text(metric)}  ({metric})",
+                variable=var,
+                bg=BG,
+                fg=TEXT,
+                activebackground=BG,
+                activeforeground=TEXT,
+                selectcolor=ENTRY_BG,
+                highlightthickness=0,
+                bd=0,
+                anchor="w",
+                font=(FONT_FAMILY, 9),
+            ).grid(row=1 + index // 2, column=index % 2, sticky="w", padx=(0, 18), pady=1)
+        result: dict[str, list[str] | None] = {"value": None}
+
+        def confirm() -> None:
+            ordered = [metric for metric in _SCENE_METRICS if variables[metric].get()]
+            result["value"] = ordered or ["cpu"]
+            dialog.destroy()
+
+        buttons = tk.Frame(body, bg=BG)
+        buttons.grid(
+            row=1 + (len(_SCENE_METRICS) + 1) // 2, column=0, columnspan=2, sticky="e", pady=(12, 0)
+        )
+        ttk.Button(buttons, text="取消", style="Small.TButton", command=dialog.destroy).pack(
+            side="right"
+        )
+        ttk.Button(buttons, text="确定", style="Small.TButton", command=confirm).pack(
+            side="right", padx=(0, 8)
+        )
+        dialog.update_idletasks()
+        try:
+            dialog.geometry(f"+{self.winfo_rootx() + 220}+{self.winfo_rooty() + 180}")
+        except tk.TclError:
+            pass
+        dialog.grab_set()
+        self.wait_window(dialog)
+        return result["value"]
 
     def _editor_color_row(
         self, grid: tk.Misc, row: int, label_text: str, current: str, key: str

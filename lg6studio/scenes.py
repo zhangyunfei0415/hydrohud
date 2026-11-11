@@ -50,10 +50,16 @@ from typing import Any
 __all__ = [
     "SCENE_VERSION",
     "DEFAULT_BACKGROUND_COLOR",
+    "DEFAULT_TEXT_COLOR",
+    "METRIC_IDS",
+    "FALLBACK_METRICS",
+    "LAYER_TYPES",
+    "LAYER_TYPE_LABELS",
     "normalize_scene",
     "preset_scenes",
     "load_project",
     "save_project",
+    "clone_scene",
 ]
 
 SCENE_VERSION = 1
@@ -62,6 +68,54 @@ DEFAULT_TEXT_COLOR = "#FFFFFF"
 
 BACKGROUND_TYPES = ("solid", "image", "gif", "video")
 FIT_MODES = ("crop", "fit", "stretch")
+
+#: ``sensors`` 缺失时的指标兜底列表；正常路径下以 ``sensors.METRIC_IDS`` 为准。
+FALLBACK_METRICS = (
+    "cpu",
+    "cpu_freq",
+    "cpu_temp",
+    "cpu_power",
+    "ram",
+    "ram_used",
+    "ram_total",
+    "gpu",
+    "gpu_temp",
+    "gpu_mem",
+    "gpu_mem_used",
+    "gpu_mem_total",
+    "gpu_power",
+    "gpu_fan",
+    "gpu_clock",
+    "disk",
+    "disk_read",
+    "disk_write",
+    "net_down",
+    "net_up",
+    "uptime",
+    "fan",
+    "cpu_cores",
+)
+
+try:  # 传感器模块是可选的：缺失时仍能编辑/渲染旧场景
+    from .sensors import METRIC_IDS as _SENSOR_METRIC_IDS
+except Exception:  # noqa: BLE001 - 任何导入失败都退化为兜底列表
+    _SENSOR_METRIC_IDS = ()
+
+METRIC_IDS: tuple[str, ...] = tuple(_SENSOR_METRIC_IDS) or FALLBACK_METRICS
+
+#: 全部合法图层类型（顺序即 GUI "添加图层" 菜单顺序）。
+LAYER_TYPES: tuple[str, ...] = ("text", "clock", "sysinfo", "bars", "chart", "gauge", "image")
+
+#: 图层类型的中文名。
+LAYER_TYPE_LABELS: dict[str, str] = {
+    "text": "文字",
+    "clock": "时钟",
+    "sysinfo": "状态文字",
+    "bars": "进度条",
+    "chart": "折线图",
+    "gauge": "仪表盘",
+    "image": "图片",
+}
 
 #: 只接受 hex 颜色；tkinter.colorchooser 返回的也是这种格式。
 _COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
@@ -84,6 +138,9 @@ _ANCHORS = {
 
 _SYSINFO_FIELDS = ("cpu", "ram")
 _ALIGNS = ("left", "center", "right")
+
+#: 图层里可以引用的指标白名单。旧场景里的 ``cpu`` / ``ram`` 天然在其内。
+_METRIC_SET = frozenset(METRIC_IDS) or frozenset(FALLBACK_METRICS)
 
 
 # --------------------------------------------------------------------- 工具函数
@@ -172,6 +229,45 @@ def _as_fields(value: Any, allowed: tuple[str, ...], default: tuple[str, ...]) -
     return result
 
 
+def _as_metrics(value: Any, default: tuple[str, ...] = ("cpu", "ram"), limit: int = 8) -> list[str]:
+    """把任意字符串列表过滤成合法指标名（保持顺序、去重、截断到 ``limit``）。"""
+    result: list[str] = []
+    if isinstance(value, str):
+        items: tuple = (value,)
+    elif isinstance(value, (list, tuple)):
+        items = tuple(value)
+    else:
+        items = ()
+    for item in items:
+        for part in _as_str(item).split(","):
+            key = part.strip().lower()
+            if key in _METRIC_SET and key not in result:
+                result.append(key)
+            if len(result) >= limit:
+                return result
+    if not result:
+        result = [key for key in default if key in _METRIC_SET][:limit]
+    return result
+
+
+def _as_metric(value: Any, default: str = "cpu") -> str:
+    """把单个值规范成合法指标名。"""
+    key = _as_str(value).strip().lower()
+    if key in _METRIC_SET:
+        return key
+    return default if default in _METRIC_SET else next(iter(sorted(_METRIC_SET)))
+
+
+def _as_bound(value: Any) -> float | None:
+    """y 轴上下限：``None``/非法值表示"按指标自身范围自动"。"""
+    if value is None:
+        return None
+    number = _as_float(value, float("nan"))
+    if not math.isfinite(number):
+        return None
+    return number
+
+
 def _norm_layer(layer: Any) -> dict | None:
     """规范化单个图层；未知类型返回 ``None``（由调用方丢弃）。"""
     layer = _as_dict(layer)
@@ -218,7 +314,7 @@ def _norm_layer(layer: Any) -> dict | None:
         base.update(
             {
                 "type": "sysinfo",
-                "fields": _as_fields(layer.get("fields"), _SYSINFO_FIELDS, _SYSINFO_FIELDS),
+                "fields": _as_metrics(layer.get("fields"), _SYSINFO_FIELDS),
                 "size": _as_size(layer.get("size"), 30),
                 "color": _as_color(layer.get("color"), "#8FD3FF"),
                 "bold": _as_bool(layer.get("bold"), False),
@@ -232,7 +328,7 @@ def _norm_layer(layer: Any) -> dict | None:
         base.update(
             {
                 "type": "bars",
-                "items": _as_fields(layer.get("items"), _SYSINFO_FIELDS, _SYSINFO_FIELDS),
+                "items": _as_metrics(layer.get("items"), _SYSINFO_FIELDS),
                 "w": _clamp(_as_float(layer.get("w"), 0.84), 0.01, 1.0),
                 "h": _clamp(_as_float(layer.get("h"), 0.10), 0.01, 1.0),
                 "gap": _clamp(_as_float(layer.get("gap"), 0.015), 0.0, 0.5),
@@ -243,6 +339,51 @@ def _norm_layer(layer: Any) -> dict | None:
                 "label_color": _as_color(layer.get("label_color"), "#E2E8F0"),
                 "size": _as_size(layer.get("size"), 22),
                 "radius": _clamp(_as_float(layer.get("radius"), 1.0), 0.0, 1.0),
+            }
+        )
+        return base
+
+    if kind == "chart":
+        base.update(
+            {
+                "type": "chart",
+                "metric": _as_metric(layer.get("metric"), "cpu"),
+                "w": _clamp(_as_float(layer.get("w"), 0.8), 0.05, 1.0),
+                "h": _clamp(_as_float(layer.get("h"), 0.22), 0.05, 1.0),
+                "color": _as_color(layer.get("color"), "#38BDF8"),
+                "color2": _as_color(layer.get("color2"), "#0EA5E9"),
+                "bg": _as_color(layer.get("bg"), "#0F172A"),
+                "line_width": _as_size(layer.get("line_width"), 2, 1, 24),
+                "fill": _as_bool(layer.get("fill"), True),
+                "grid": _as_bool(layer.get("grid"), True),
+                "label": _as_bool(layer.get("label"), True),
+                "size": _as_size(layer.get("size"), 18),
+                "radius": _clamp(_as_float(layer.get("radius"), 0.5), 0.0, 1.0),
+                "min": _as_bound(layer.get("min")),
+                "max": _as_bound(layer.get("max")),
+                "points": _as_size(layer.get("points"), 120, 2, 480),
+                "smooth": _as_bool(layer.get("smooth"), False),
+            }
+        )
+        return base
+
+    if kind == "gauge":
+        base.update(
+            {
+                "type": "gauge",
+                "metric": _as_metric(layer.get("metric"), "cpu"),
+                "diameter": _clamp(_as_float(layer.get("diameter"), 0.5), 0.05, 1.5),
+                "thickness": _clamp(_as_float(layer.get("thickness"), 0.06), 0.005, 0.5),
+                "color": _as_color(layer.get("color"), "#38BDF8"),
+                "track": _as_color(layer.get("track"), "#1E293B"),
+                "label": _as_bool(layer.get("label"), True),
+                "size": _as_size(layer.get("size"), 20),
+                "value_size": _as_size(layer.get("value_size"), 48),
+                "min": _as_bound(layer.get("min")),
+                "max": _as_bound(layer.get("max")),
+                "start_angle": _as_float(layer.get("start_angle"), 135.0),
+                "sweep": _clamp(_as_float(layer.get("sweep"), 270.0), 1.0, 360.0),
+                "show_unit": _as_bool(layer.get("show_unit"), True),
             }
         )
         return base
@@ -398,7 +539,7 @@ def preset_scenes() -> dict[str, dict]:
                 fields=["cpu", "ram"],
                 x=0.5,
                 y=0.24,
-                size=36,
+                size=26,
                 color="#22D3EE",
                 bold=True,
             ),
@@ -548,6 +689,159 @@ def preset_scenes() -> dict[str, dict]:
                 y=0.6,
                 size=24,
                 color="#E2E8F0",
+                shadow=False,
+            ),
+        ],
+    }
+
+    presets["硬件温度"] = {
+        "name": "硬件温度",
+        "background": {"type": "solid", "color": "#07090F"},
+        "tint": {"color": "#F97316", "alpha": 0.06},
+        "layers": [
+            _layer("text", text="硬件温度", x=0.5, y=0.08, size=26, color="#94A3B8"),
+            _layer(
+                "gauge",
+                metric="cpu_temp",
+                x=0.27,
+                y=0.36,
+                diameter=0.40,
+                thickness=0.055,
+                color="#38BDF8",
+                track="#132133",
+                size=16,
+                value_size=34,
+            ),
+            _layer(
+                "gauge",
+                metric="gpu_temp",
+                x=0.73,
+                y=0.36,
+                diameter=0.40,
+                thickness=0.055,
+                color="#FB7185",
+                track="#2A1420",
+                size=16,
+                value_size=34,
+            ),
+            _layer("text", text="CPU", x=0.27, y=0.63, size=16, color="#7DD3FC"),
+            _layer("text", text="GPU", x=0.73, y=0.63, size=16, color="#FDA4AF"),
+            _layer(
+                "sysinfo",
+                fields=["cpu", "gpu", "ram"],
+                x=0.5,
+                y=0.78,
+                size=18,
+                color="#CBD5E1",
+                shadow=False,
+            ),
+            _layer(
+                "bars",
+                items=["gpu_power", "gpu_fan"],
+                x=0.1,
+                y=0.85,
+                w=0.8,
+                h=0.09,
+                color="#FBBF24",
+                color2="#34D399",
+                bg="#131C29",
+                size=15,
+                gap=0.012,
+            ),
+        ],
+    }
+
+    presets["性能曲线"] = {
+        "name": "性能曲线",
+        "background": {"type": "solid", "color": "#050A12"},
+        "tint": {"color": "#22D3EE", "alpha": 0.06},
+        "layers": [
+            _layer(
+                "text",
+                text="{time}",
+                x=0.5,
+                y=0.08,
+                size=46,
+                color="#E2E8F0",
+                bold=True,
+                shadow=False,
+            ),
+            _layer(
+                "chart",
+                metric="cpu",
+                x=0.08,
+                y=0.2,
+                w=0.84,
+                h=0.24,
+                color="#38BDF8",
+                color2="#0EA5E9",
+                bg="#0B1220",
+                label=True,
+                size=18,
+            ),
+            _layer(
+                "chart",
+                metric="gpu",
+                x=0.08,
+                y=0.48,
+                w=0.84,
+                h=0.24,
+                color="#A78BFA",
+                color2="#7C3AED",
+                bg="#0B1220",
+                label=True,
+                size=18,
+            ),
+            _layer(
+                "sysinfo",
+                fields=["cpu", "gpu", "ram"],
+                x=0.5,
+                y=0.85,
+                size=18,
+                color="#94A3B8",
+                shadow=False,
+            ),
+        ],
+    }
+
+    presets["极客面板"] = {
+        "name": "极客面板",
+        "background": {"type": "solid", "color": "#060D09"},
+        "tint": {"color": "#22C55E", "alpha": 0.05},
+        "layers": [
+            _layer("clock", x=0.5, y=0.13, size=64, color="#4ADE80", bold=True),
+            _layer(
+                "gauge",
+                metric="cpu",
+                x=0.5,
+                y=0.44,
+                diameter=0.52,
+                thickness=0.05,
+                color="#22C55E",
+                track="#0C2016",
+                size=18,
+                value_size=44,
+            ),
+            _layer(
+                "bars",
+                items=["gpu", "ram"],
+                x=0.12,
+                y=0.68,
+                w=0.76,
+                h=0.10,
+                color="#34D399",
+                color2="#22D3EE",
+                bg="#0A1C14",
+                size=17,
+                gap=0.012,
+            ),
+            _layer(
+                "sysinfo",
+                fields=["cpu_temp", "gpu_temp", "disk"],
+                x=0.5,
+                y=0.87,
+                size=17,
+                color="#86EFAC",
                 shadow=False,
             ),
         ],

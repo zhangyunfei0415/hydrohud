@@ -63,6 +63,9 @@ SLUGS = {
     "冰晶蓝调": "ice-blue",
     "纯色标语": "solid-slogan",
     "图片背景": "image-bg",
+    "硬件温度": "hw-temp",
+    "性能曲线": "perf-chart",
+    "极客面板": "geek-panel",
 }
 
 
@@ -224,7 +227,7 @@ def main() -> int:
 
     demos = [
         (
-            "09-image-bg-demo",
+            "12-image-bg-demo",
             "图片背景",
             {
                 "background": {"type": "image", "path": photo, "fit": "crop"},
@@ -244,7 +247,7 @@ def main() -> int:
             },
         ),
         (
-            "10-gif-bg-frame-a",
+            "13-gif-bg-frame-a",
             "GIF 背景（帧 1）",
             {
                 "background": {"type": "gif", "path": gif, "fit": "crop"},
@@ -252,7 +255,7 @@ def main() -> int:
             },
         ),
         (
-            "11-gif-bg-frame-b",
+            "14-gif-bg-frame-b",
             "GIF 背景（帧 7）",
             {
                 "background": {"type": "gif", "path": gif, "fit": "crop"},
@@ -291,9 +294,9 @@ def main() -> int:
                 },
             ],
         }
-        path = os.path.join(PREVIEW_DIR, "12-video-bg-demo.png")
+        path = os.path.join(PREVIEW_DIR, "15-video-bg-demo.png")
         image = _render_to(path, scene, 1.1)
-        tiles.append(("12 视频背景", image))
+        tiles.append(("15 视频背景", image))
         benchmarks.append(("视频背景", _benchmark(scene, count=30)))
         print(f"[preview] {path}")
     else:

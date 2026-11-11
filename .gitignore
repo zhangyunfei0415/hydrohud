@@ -12,3 +12,8 @@ smoke-window.png
 exe-smoke.png
 exe-smoke-window.png
 live-*.png
+
+# 验证脚本产生的临时工程
+_verify-*.lg6.json
+smoke-v12*.png
+exe-v12*.png

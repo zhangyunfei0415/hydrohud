@@ -1,0 +1,11 @@
+{
+  "name": "性能曲线",
+  "background": { "type": "solid", "color": "#050A12" },
+  "tint": { "color": "#22D3EE", "alpha": 0.06 },
+  "layers": [
+    { "type": "text", "text": "{time}", "x": 0.5, "y": 0.08, "size": 46, "color": "#E2E8F0", "bold": true, "shadow": false },
+    { "type": "chart", "metric": "cpu", "x": 0.08, "y": 0.2, "w": 0.84, "h": 0.24, "color": "#38BDF8", "color2": "#0EA5E9", "bg": "#0B1220", "label": true, "size": 18 },
+    { "type": "chart", "metric": "gpu", "x": 0.08, "y": 0.48, "w": 0.84, "h": 0.24, "color": "#A78BFA", "color2": "#7C3AED", "bg": "#0B1220", "label": true, "size": 18 },
+    { "type": "sysinfo", "fields": ["cpu", "gpu", "ram"], "x": 0.5, "y": 0.85, "size": 18, "color": "#94A3B8", "shadow": false }
+  ]
+}
