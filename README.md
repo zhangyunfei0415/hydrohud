@@ -54,7 +54,7 @@
 
 ### 方式一：直接跑 exe（推荐给普通用户）
 
-`dist\HydroHUD.exe`（单文件，约 72 MB）双击运行。**不需要安装 Python**，视频 / GIF 解码用的 ffmpeg 已内置。
+到 [Releases](https://github.com/zhangyunfei0415/hydrohud/releases) 下载 `HydroHUD.exe`（单文件，约 72 MB）双击运行。**不需要安装 Python**，视频 / GIF 解码用的 ffmpeg 已内置。
 
 > 使用前请先退出官方 `TCOMAS` 软件（任务管理器里结束 `DeviceDriver.exe`），HID 设备同一时间只能被一个程序占用。
 
