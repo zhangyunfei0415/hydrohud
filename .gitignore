@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+build/
+dist/
+*.spec
+
+# 本地验证产生的截图
+smoke.png
+smoke-window.png
+exe-smoke.png
+exe-smoke-window.png
+live-*.png
