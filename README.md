@@ -146,6 +146,7 @@ lg600-studio/
 │   ├── app.py        Tkinter 界面
 │   └── __main__.py   python -m lg6studio 入口
 ├── docs/PROTOCOL.md  屏幕 HID 协议逆向记录
+├── ROADMAP.md        后续版本规划与待验证实验
 ├── tests/            pytest 用例（52 项：渲染、场景、报文分帧、JPEG 编码）
 ├── preview/          预设渲染预览图
 ├── assets/           图标、界面截图
@@ -162,6 +163,12 @@ lg600-studio/
 - 单帧 15300 字节上限意味着极复杂画面会被压缩到质量较低（画面依旧正常，只是细节少）。
 - 视频需要 ffmpeg：`pip install imageio imageio-ffmpeg`，打包版已内置。
 - 官方软件开着时无法连接设备，界面会提示退出官方软件。
+
+## 路线图
+
+未来规划（v1.1 顺手 → v1.2 内容 → v1.3 协议深挖 → v1.4 跨平台 → v2.0 平台化）见
+[ROADMAP.md](ROADMAP.md)，其中列了各版本的功能清单、工作量、需要先用真机验证的 6 个实验
+（例如「固件是否接受超过 15 包」决定画质天花板、「flash 上传能否换开机图」）。
 
 ## 许可
 
