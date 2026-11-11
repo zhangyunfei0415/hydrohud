@@ -265,4 +265,6 @@ HydroHUD/
 
 ## 许可
 
-MIT，见 [LICENSE](LICENSE)。协议为互操作性目的逆向自自有硬件；TCOMAS 与 LG600 为其各自所有者的商标，本项目与 TCOMAS 无关联。
+MIT，见 [LICENSE](LICENSE)。
+
+协议为互操作性目的、在自有硬件上逆向所得；TCOMAS、LG600 及 TCOMAS 软件是各自所有者的商标，本项目与 TCOMAS 无关联，也未获其背书。
