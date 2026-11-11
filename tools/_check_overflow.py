@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from lg6studio import render, scenes, sensors  # noqa: E402
+from hydrohud import render, scenes, sensors  # noqa: E402
 
 LIMIT = 470  # 留 5 px 边距
 

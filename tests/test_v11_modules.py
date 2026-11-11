@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from lg6studio import autostart, diagnostics, hotkeys, playlist, settings, tray
+from hydrohud import autostart, diagnostics, hotkeys, playlist, settings, tray
 
 
 # --------------------------------------------------------------------------- #
@@ -114,9 +114,9 @@ def fake_winreg(monkeypatch):
 
 
 def test_build_command_frozen(monkeypatch):
-    fake_sys = SimpleNamespace(frozen=True, executable=r"C:\Apps\LG600Studio.exe")
+    fake_sys = SimpleNamespace(frozen=True, executable=r"C:\Apps\HydroHUD.exe")
     monkeypatch.setattr(autostart, "sys", fake_sys)
-    assert autostart.build_command() == r'"C:\Apps\LG600Studio.exe"'
+    assert autostart.build_command() == r'"C:\Apps\HydroHUD.exe"'
 
 
 def test_build_command_source_mode(monkeypatch):
@@ -128,13 +128,13 @@ def test_build_command_source_mode(monkeypatch):
 
 
 def test_build_command_autostream_and_project():
-    target = Path(r"C:\Apps\LG600 Studio.exe")
+    target = Path(r"C:\Apps\HydroHUD.exe")
     command = autostart.build_command(
-        target=target, autostream=True, project=Path(r"C:\projects\demo.lg6")
+        target=target, autostream=True, project=Path(r"C:\projects\demo.hud")
     )
-    assert command.startswith(r'"C:\Apps\LG600 Studio.exe"')
+    assert command.startswith(r'"C:\Apps\HydroHUD.exe"')
     assert "--autostream" in command
-    assert r'--project "C:\projects\demo.lg6"' in command
+    assert r'--project "C:\projects\demo.hud"' in command
 
 
 def test_is_enabled_true_and_false(fake_winreg):
@@ -150,7 +150,7 @@ def test_read_command_missing_key_returns_none(monkeypatch):
 
 
 def test_enable_and_disable_write_fake_registry(fake_winreg):
-    command = r'"C:\Apps\LG600Studio.exe" --autostream'
+    command = r'"C:\Apps\HydroHUD.exe" --autostream'
     autostart.enable(command)
     assert fake_winreg.stored[autostart.RUN_VALUE] == (command, fake_winreg.REG_SZ)
     assert ("SetValueEx", autostart.RUN_VALUE, fake_winreg.REG_SZ, command) in fake_winreg.calls
@@ -212,7 +212,7 @@ def test_tray_start_and_stop_with_fake_shell(monkeypatch):
     monkeypatch.setattr(tray.user32, "Shell_NotifyIconW", fake_shell_notify)
     monkeypatch.setattr(tray.TrayIcon, "_create_window", fake_create_window)
     monkeypatch.setattr(tray.TrayIcon, "_destroy_window", lambda self: setattr(self, "_hwnd", None))
-    icon = tray.TrayIcon(None, tooltip="LG600 Studio")
+    icon = tray.TrayIcon(None, tooltip="HydroHUD")
     assert icon.start() is True
     assert icon.start() is True  # 重复 start 不重复注册
     assert notified == [tray.NIM_ADD]
@@ -286,13 +286,13 @@ def playlist_appdata(tmp_path, monkeypatch):
 
 
 def _sample_items(tmp_path):
-    return [tmp_path / "一.lg6", tmp_path / "二.lg6", tmp_path / "三.lg6"]
+    return [tmp_path / "一.hud", tmp_path / "二.hud", tmp_path / "三.hud"]
 
 
 def test_list_path_uses_appdata(playlist_appdata):
     path = playlist.LIST_PATH()
     assert path.name == "playlist.json"
-    assert path.parent.name == "LG600Studio"
+    assert path.parent.name == "HydroHUD"
     assert playlist_appdata in path.parents
 
 

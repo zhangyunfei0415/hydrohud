@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PIL import Image  # noqa: E402
 
-from lg6studio import device  # noqa: E402
+from hydrohud import device  # noqa: E402
 
 
 def main() -> int:

@@ -17,7 +17,7 @@ import ctypes
 import logging
 from typing import Any, Callable
 
-logger = logging.getLogger("lg6studio.hotkeys")
+logger = logging.getLogger("hydrohud.hotkeys")
 
 try:  # 非 Windows 平台仍允许 import，只是不可用
     from ctypes import wintypes

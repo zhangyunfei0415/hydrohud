@@ -14,8 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import lg6studio.app as appmod  # noqa: E402
-import lg6studio.device as device  # noqa: E402
+import hydrohud.app as appmod  # noqa: E402
+import hydrohud.device as device  # noqa: E402
 
 SECONDS = 6.0
 START_DELAY = 0.5
@@ -29,7 +29,7 @@ def build_project() -> Path:
         "background": {"type": "image", "path": str(photo), "fit": "crop"},
         "layers": [{"type": "clock", "x": 0.5, "y": 0.5, "size": 96, "color": "#E2E8F0"}],
     }
-    target = ROOT / "_verify-photo.lg6.json"
+    target = ROOT / "_verify-photo.hud.json"
     target.write_text(json.dumps(project, ensure_ascii=False), encoding="utf-8")
     return target
 

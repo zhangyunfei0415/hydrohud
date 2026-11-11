@@ -21,7 +21,7 @@
 
 # MIT License
 #
-# Copyright (c) 2026 LG600 Studio contributors
+# Copyright (c) 2026 HydroHUD contributors
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal

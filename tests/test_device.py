@@ -1,4 +1,4 @@
-"""Tests for the HID framing and JPEG encoding in `lg6studio.device` (no hardware)."""
+"""Tests for the HID framing and JPEG encoding in `hydrohud.device` (no hardware)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import random
 import pytest
 from PIL import Image
 
-from lg6studio import device
+from hydrohud import device
 
 
 def _noise_image(size: int = 480) -> Image.Image:

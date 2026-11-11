@@ -1,6 +1,6 @@
 """日志与崩溃诊断：按天写入文件，并接管未捕获异常。
 
-- :func:`install` 安装一个带 ``_lg6studio_owned`` 标记的 ``FileHandler``，重复调用
+- :func:`install` 安装一个带 ``_hydrohud_owned`` 标记的 ``FileHandler``，重复调用
   会先移除自己旧 handler 再挂新的，所以不会重复写行；
 - :func:`log_path` 的日期在调用时求值，跨天自动换文件，不轮转、不清理；
 - 未捕获异常仍然会继续交给原始 hook（保留 stderr 输出），只是先落一份日志；
@@ -19,10 +19,10 @@ from pathlib import Path
 from typing import Any
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
-APP_DIR_NAME = "LG600Studio"
+APP_DIR_NAME = "HydroHUD"
 LOG_DIR_NAME = "logs"
 FILE_PREFIX = "app-"
-OWNED_ATTR = "_lg6studio_owned"
+OWNED_ATTR = "_hydrohud_owned"
 
 # 首次 install 时记下的原始钩子，重复 install 不再嵌套包装。
 _original_excepthook: Any = None
@@ -31,7 +31,7 @@ _excepthook_installed = False
 
 
 def LOG_DIR() -> Path:
-    """日志目录：``%LOCALAPPDATA%\\LG600Studio\\logs``。"""
+    """日志目录：``%LOCALAPPDATA%\\HydroHUD\\logs``。"""
     local = os.environ.get("LOCALAPPDATA")
     base = Path(local) if local else Path.home() / "AppData" / "Local"
     return base / APP_DIR_NAME / LOG_DIR_NAME
@@ -43,7 +43,7 @@ def log_path() -> Path:
     return LOG_DIR() / f"{FILE_PREFIX}{stamp}.log"
 
 
-def get_logger(name: str = "lg6studio") -> logging.Logger:
+def get_logger(name: str = "hydrohud") -> logging.Logger:
     """取日志记录器；只返回对象，不挂 handler、不改全局配置。"""
     return logging.getLogger(name)
 

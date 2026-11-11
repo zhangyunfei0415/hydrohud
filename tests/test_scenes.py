@@ -1,6 +1,6 @@
 # MIT License
 #
-# Copyright (c) 2026 LG600 Studio contributors
+# Copyright (c) 2026 HydroHUD contributors
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -37,7 +37,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from lg6studio import scenes  # noqa: E402
+from hydrohud import scenes  # noqa: E402
 
 
 def test_metric_ids_cover_the_documented_set() -> None:
@@ -225,7 +225,7 @@ def test_new_presets_use_the_new_layer_types() -> None:
 def test_project_roundtrip_keeps_new_layers(tmp_path) -> None:
     """保存/载入工程后 chart 与 gauge 的关键字段还在。"""
     scene = scenes.preset_scenes()["性能曲线"]
-    path = os.path.join(str(tmp_path), "perf.lg6.json")
+    path = os.path.join(str(tmp_path), "perf.hud.json")
     scenes.save_project(scene, path)
     with open(path, encoding="utf-8") as handle:
         data = json.load(handle)

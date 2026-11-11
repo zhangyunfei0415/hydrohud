@@ -1,11 +1,11 @@
 """渲染引擎测试：预设、容错、项目文件、系统采样与性能。
 
-运行：``C:\\Python314\\python.exe -m pytest tests -q``（在 lg600-studio 目录下）。
+运行：``C:\\Python314\\python.exe -m pytest tests -q``（在 HydroHUD 目录下）。
 """
 
 # MIT License
 #
-# Copyright (c) 2026 LG600 Studio contributors
+# Copyright (c) 2026 HydroHUD contributors
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -38,20 +38,20 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from lg6studio.render import (  # noqa: E402
+from hydrohud.render import (  # noqa: E402
     SCREEN_H,
     SCREEN_W,
     clear_cache,
     load_font,
     render_scene,
 )
-from lg6studio.scenes import (  # noqa: E402
+from hydrohud.scenes import (  # noqa: E402
     load_project,
     normalize_scene,
     preset_scenes,
     save_project,
 )
-from lg6studio.sysmon import CpuSampler  # noqa: E402
+from hydrohud.sysmon import CpuSampler  # noqa: E402
 
 PRESETS = preset_scenes()
 
@@ -259,7 +259,7 @@ def test_video_background_decodes(tmp_path) -> None:
 
 # ------------------------------------------------------------------ 项目文件
 def test_project_roundtrip(tmp_path) -> None:
-    path = str(tmp_path / "项目.lg6.json")
+    path = str(tmp_path / "项目.hud.json")
     scene = PRESETS["极简时钟"]
     save_project(scene, path)
     loaded = load_project(path)
@@ -270,18 +270,18 @@ def test_project_roundtrip(tmp_path) -> None:
 
 
 def test_save_project_creates_parent_directory(tmp_path) -> None:
-    path = str(tmp_path / "sub" / "dir" / "a.lg6.json")
+    path = str(tmp_path / "sub" / "dir" / "a.hud.json")
     save_project(PRESETS["纯色标语"], path)
     assert os.path.isfile(path)
 
 
 def test_load_project_rejects_bad_json(tmp_path) -> None:
-    path = tmp_path / "bad.lg6.json"
+    path = tmp_path / "bad.hud.json"
     path.write_text("{not json", encoding="utf-8")
     with pytest.raises(ValueError):
         load_project(str(path))
     with pytest.raises(FileNotFoundError):
-        load_project(str(tmp_path / "nope.lg6.json"))
+        load_project(str(tmp_path / "nope.hud.json"))
 
 
 # ------------------------------------------------------------------ 系统采样

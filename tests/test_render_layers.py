@@ -6,7 +6,7 @@
 
 # MIT License
 #
-# Copyright (c) 2026 LG600 Studio contributors
+# Copyright (c) 2026 HydroHUD contributors
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -38,9 +38,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from lg6studio import render  # noqa: E402
-from lg6studio.render import SCREEN_H, SCREEN_W, clear_cache, render_scene  # noqa: E402
-from lg6studio.scenes import normalize_scene  # noqa: E402
+from hydrohud import render  # noqa: E402
+from hydrohud.render import SCREEN_H, SCREEN_W, clear_cache, render_scene  # noqa: E402
+from hydrohud.scenes import normalize_scene  # noqa: E402
 
 BLACK = (0, 0, 0)
 

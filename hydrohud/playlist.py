@@ -14,12 +14,12 @@ from pathlib import Path
 from typing import Any, Iterable
 
 DEFAULT_INTERVAL = 30.0
-APP_DIR_NAME = "LG600Studio"
+APP_DIR_NAME = "HydroHUD"
 FILE_NAME = "playlist.json"
 
 
 def LIST_PATH() -> Path:
-    """播放列表文件的默认位置：``%APPDATA%\\LG600Studio\\playlist.json``。"""
+    """播放列表文件的默认位置：``%APPDATA%\\HydroHUD\\playlist.json``。"""
     appdata = os.environ.get("APPDATA")
     base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
     return base / APP_DIR_NAME / FILE_NAME

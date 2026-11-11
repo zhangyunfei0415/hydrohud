@@ -1,6 +1,6 @@
-"""LG600 Studio 的 Tkinter 图形界面。
+"""HydroHUD 的 Tkinter 图形界面。
 
-启动方式：``python -m lg6studio``。
+启动方式：``python -m hydrohud``。
 
 设计要点：
 
@@ -52,7 +52,7 @@ def _warn_once(message: str) -> None:
     if message in _WARNED:
         return
     _WARNED.add(message)
-    print(f"[lg6studio] {message}", file=sys.stderr)
+    print(f"[hydrohud] {message}", file=sys.stderr)
 
 
 _TIMER_PERIOD_RAISED = False
@@ -84,7 +84,7 @@ def _import_optional(module_name: str) -> Any:
     else:
         candidates = []
     candidates.append((module_name, None))
-    # 直接运行 app.py（而不是 python -m lg6studio）时把包目录加入搜索路径。
+    # 直接运行 app.py（而不是 python -m hydrohud）时把包目录加入搜索路径。
     if __package__ in (None, ""):
         package_dir = os.path.dirname(os.path.abspath(__file__))
         if package_dir not in sys.path:
@@ -97,7 +97,7 @@ def _import_optional(module_name: str) -> Any:
             if first_error is None:
                 first_error = exc
     if first_error is not None:
-        _LOAD_WARNINGS.append(f"lg6studio.{module_name} 加载失败：{first_error}")
+        _LOAD_WARNINGS.append(f"hydrohud.{module_name} 加载失败：{first_error}")
     return None
 
 
@@ -165,7 +165,7 @@ IMG_FILETYPES = [
     ("视频", "*.mp4 *.avi *.webm *.mov *.mkv"),
     ("所有文件", "*.*"),
 ]
-PROJECT_FILETYPES = [("LG600 项目", "*.lg6.json"), ("JSON 文件", "*.json"), ("所有文件", "*.*")]
+PROJECT_FILETYPES = [("LG600 项目", "*.hud.json"), ("JSON 文件", "*.json"), ("所有文件", "*.*")]
 
 try:  # Pillow 12 里 LANCZOS 位于 Resampling 下
     _RESAMPLE = Image.Resampling.LANCZOS
@@ -240,7 +240,7 @@ def _placeholder_image(lines: tuple[str, ...], side: int = SCREEN_SIZE) -> Image
         for wrapped in _wrap_text(draw, raw_line, body_font, side * 0.82):
             draw.text((side / 2, y), wrapped, font=body_font, fill=MUTED, anchor="mm")
             y += side * 0.055
-    draw.text((side - 14, side - 14), "LG600 Studio", font=body_font, fill="#334155", anchor="rb")
+    draw.text((side - 14, side - 14), "HydroHUD", font=body_font, fill="#334155", anchor="rb")
     return image
 
 
@@ -254,7 +254,7 @@ def friendly_device_error(exc: BaseException) -> str:
     text = str(exc).strip() or exc.__class__.__name__
     low = text.lower()
     if "device.py" in text or "设备模块" in text:
-        return "设备模块未就绪：lg6studio/device.py 缺失或加载失败。"
+        return "设备模块未就绪：hydrohud/device.py 缺失或加载失败。"
     if (
         "cannot open" in low
         or "error 32" in low
@@ -683,7 +683,7 @@ class RenderWorker:
         self._cond = threading.Condition()
         self._request: tuple[dict, float, int] | None = None
         self._stop = False
-        self._thread = threading.Thread(target=self._loop, daemon=True, name="lg6-preview")
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="hud-preview")
         self._thread.start()
 
     def update(self, scene: dict, t: float, side: int) -> None:
@@ -752,7 +752,7 @@ class RenderWorker:
 # 主窗口
 # --------------------------------------------------------------------------- #
 class App(tk.Tk):
-    """LG600 Studio 主窗口：设备控制、实时预览、场景编辑、项目文件。"""
+    """HydroHUD 主窗口：设备控制、实时预览、场景编辑、项目文件。"""
 
     def __init__(self, smoke_shot: str | None = None) -> None:
         super().__init__()
@@ -811,7 +811,7 @@ class App(tk.Tk):
 
         self.scene: dict = self._initial_scene()
 
-        self.title("LG600 Studio — TCOMAS LG600 开源控制台")
+        self.title("HydroHUD — TCOMAS LG600 开源控制台")
         self.geometry("1180x780")
         self.minsize(1080, 700)
         self.configure(bg=BG)
@@ -842,7 +842,7 @@ class App(tk.Tk):
         self._init_convenience()
         if _LOAD_WARNINGS:
             detail = "；".join(_LOAD_WARNINGS)
-            print(f"[lg6studio] 可选模块告警：{detail}", file=sys.stderr)
+            print(f"[hydrohud] 可选模块告警：{detail}", file=sys.stderr)
 
     # ------------------------------------------------------------------ #
     # 初始化：主题 / 菜单 / 布局
@@ -1076,7 +1076,7 @@ class App(tk.Tk):
 
         help_menu = tk.Menu(menubar, **menu_options)
         help_menu.add_command(label="打开日志目录", command=self._open_log_folder)
-        help_menu.add_command(label="关于 LG600 Studio", command=self._on_about)
+        help_menu.add_command(label="关于 HydroHUD", command=self._on_about)
         menubar.add_cascade(label="帮助", menu=help_menu)
         self.configure(menu=menubar)
 
@@ -1088,7 +1088,7 @@ class App(tk.Tk):
         header.grid(row=0, column=0, sticky="ew", padx=16, pady=(12, 4))
         brand = tk.Frame(header, bg=BG)
         brand.pack(side="left")
-        tk.Label(brand, text="LG600 Studio", bg=BG, fg=TEXT, font=(FONT_FAMILY, 18, "bold")).pack(
+        tk.Label(brand, text="HydroHUD", bg=BG, fg=TEXT, font=(FONT_FAMILY, 18, "bold")).pack(
             anchor="w"
         )
         tk.Label(
@@ -1779,9 +1779,9 @@ class App(tk.Tk):
         else:
             label += "  ✓ 已保存"
         self._path_label.configure(text=label)
-        title = "LG600 Studio — TCOMAS LG600 开源控制台"
+        title = "HydroHUD — TCOMAS LG600 开源控制台"
         if self.project_path:
-            title = f"LG600 Studio — {os.path.basename(self.project_path)}"
+            title = f"HydroHUD — {os.path.basename(self.project_path)}"
         try:
             self.title(title)
         except tk.TclError:
@@ -1809,14 +1809,14 @@ class App(tk.Tk):
             os.makedirs(directory, exist_ok=True)
         with open(path, "w", encoding="utf-8") as handle:
             json.dump(
-                {"format": "lg6-studio.scene/1", "scene": scene},
+                {"format": "hydrohud.scene/1", "scene": scene},
                 handle,
                 ensure_ascii=False,
                 indent=2,
             )
 
     def load_project(self, path: str, notify: bool = True) -> bool:
-        """打开 .lg6.json 项目；返回是否成功（供命令行与菜单共用）。"""
+        """打开 .hud.json 项目；返回是否成功（供命令行与菜单共用）。"""
         try:
             data = self._load_project_file(path)
             self.scene = self._normalize(data)
@@ -1856,7 +1856,7 @@ class App(tk.Tk):
 
     def _on_open_project(self) -> None:
         path = filedialog.askopenfilename(
-            title="打开 LG600 Studio 项目", filetypes=PROJECT_FILETYPES, parent=self
+            title="打开 HydroHUD 项目", filetypes=PROJECT_FILETYPES, parent=self
         )
         if path:
             self.load_project(path)
@@ -1878,8 +1878,8 @@ class App(tk.Tk):
 
     def _on_save_project_as(self) -> None:
         path = filedialog.asksaveasfilename(
-            title="保存 LG600 Studio 项目",
-            defaultextension=".lg6.json",
+            title="保存 HydroHUD 项目",
+            defaultextension=".hud.json",
             filetypes=PROJECT_FILETYPES,
             parent=self,
         )
@@ -1899,8 +1899,8 @@ class App(tk.Tk):
 
     def _on_about(self) -> None:
         messagebox.showinfo(
-            "关于 LG600 Studio",
-            f"LG600 Studio {APP_VERSION}\n"
+            "关于 HydroHUD",
+            f"HydroHUD {APP_VERSION}\n"
             "TCOMAS LG600（1A2C:1520）水冷屏的开源控制台\n\n"
             "MIT License · Python + Tkinter + Pillow\n\n"
             f"{RECONNECT_HINT}",
@@ -1919,7 +1919,7 @@ class App(tk.Tk):
                 raise TypeError("render_scene() 必须返回 PIL.Image.Image")
             return image.convert("RGB")
         return _placeholder_image(
-            ("渲染引擎未就绪", "lg6studio/render.py 缺失或加载失败", "界面仍可编辑并保存项目"),
+            ("渲染引擎未就绪", "hydrohud/render.py 缺失或加载失败", "界面仍可编辑并保存项目"),
             SCREEN_SIZE,
         )
 
@@ -2841,7 +2841,7 @@ class App(tk.Tk):
 
     def _detect_device(self, auto: bool = False) -> None:
         if device_mod is None:
-            self._set_status("设备模块未就绪：lg6studio/device.py 缺失或加载失败", "warn")
+            self._set_status("设备模块未就绪：hydrohud/device.py 缺失或加载失败", "warn")
             if self._dev_iface_label is not None:
                 self._dev_iface_label.configure(text="接口：device.py 未就绪")
             return
@@ -2856,7 +2856,7 @@ class App(tk.Tk):
                 return
             self._post("devices", devices)
 
-        threading.Thread(target=job, daemon=True, name="lg6-enum").start()
+        threading.Thread(target=job, daemon=True, name="hud-enum").start()
 
     def _apply_devices(self, devices: Any) -> None:
         if not isinstance(devices, list):
@@ -2912,7 +2912,7 @@ class App(tk.Tk):
             elif ok_message:
                 self._post("status", ok_message, "ok")
 
-        threading.Thread(target=job, daemon=True, name=f"lg6-ctl-{name}").start()
+        threading.Thread(target=job, daemon=True, name=f"hud-ctl-{name}").start()
 
     def _open_control_locked(self) -> None:
         if device_mod is None:
@@ -2984,7 +2984,7 @@ class App(tk.Tk):
             if quadrant is not None:
                 self._post("rotation", quadrant * 90)
 
-        threading.Thread(target=job, daemon=True, name="lg6-query").start()
+        threading.Thread(target=job, daemon=True, name="hud-query").start()
 
     # ------------------------------------------------------------------ #
     # 推流
@@ -3034,7 +3034,7 @@ class App(tk.Tk):
         self._stream_started_at = time.monotonic()
         self._stream_stop.clear()
         self._stream_thread = threading.Thread(
-            target=self._stream_loop, daemon=True, name="lg6-stream"
+            target=self._stream_loop, daemon=True, name="hud-stream"
         )
         self._stream_thread.start()
         self._update_stream_buttons(True)
@@ -3079,7 +3079,7 @@ class App(tk.Tk):
                         f"设备断开（{exc}），正在重连 {attempt + 1}/3…",
                         "warn",
                     )
-                    self._update_tray_tooltip("LG600 Studio · 正在重连屏幕…")
+                    self._update_tray_tooltip("HydroHUD · 正在重连屏幕…")
                     if self._stream_stop.wait(min(0.6 * (attempt + 1), 2.0)):
                         return True
                     try:
@@ -3186,12 +3186,12 @@ class App(tk.Tk):
             if state == "streaming":
                 self._set_connection("● 正在推流", ACCENT_2)
                 self._update_stream_buttons(True)
-                self._update_tray_tooltip(f"LG600 Studio · 正在推流（{frames} 帧）")
+                self._update_tray_tooltip(f"HydroHUD · 正在推流（{frames} 帧）")
                 self._set_status(f"正在推送画面（{self._stream_fps:.0f} fps 目标）…", "stream")
             else:
                 self._stream_thread = None
                 self._update_stream_buttons(False)
-                self._update_tray_tooltip(f"LG600 Studio · 已停止（共 {frames} 帧）")
+                self._update_tray_tooltip(f"HydroHUD · 已停止（共 {frames} 帧）")
                 if error:
                     self._set_connection("● 设备异常", ERR)
                     self._set_status(str(error), "error")
@@ -3237,7 +3237,7 @@ class App(tk.Tk):
             self._set_status(f"界面异常已捕获：{summary}", "error")
         except Exception:
             pass
-        print(f"[lg6studio] 界面回调异常：{summary}", file=sys.stderr)
+        print(f"[hydrohud] 界面回调异常：{summary}", file=sys.stderr)
 
     # ------------------------------------------------------------------ #
     # 冒烟截图 / 关闭
@@ -3245,7 +3245,7 @@ class App(tk.Tk):
     def _schedule_smoke(self) -> None:
         self.after(1200, self._smoke_capture)
         self.after(1600, self._smoke_finish)
-        threading.Thread(target=self._smoke_watchdog, daemon=True, name="lg6-smoke-wd").start()
+        threading.Thread(target=self._smoke_watchdog, daemon=True, name="hud-smoke-wd").start()
 
     def _smoke_watchdog(self) -> None:
         time.sleep(20.0)
@@ -3442,7 +3442,7 @@ class App(tk.Tk):
             self._tray = tray_mod.TrayIcon(
                 self,
                 icon_path=self._tray_icon_path(),
-                tooltip=f"LG600 Studio {APP_VERSION}",
+                tooltip=f"HydroHUD {APP_VERSION}",
                 on_show=self._show_window,
                 on_toggle=self._on_toggle_stream,
                 on_rotate=self._on_next_project,
@@ -3569,7 +3569,7 @@ class App(tk.Tk):
         if not self.project_path:
             self._on_save_project_as()
         if not self.project_path:
-            self._set_status("先把当前工程保存成 .lg6.json 才能加入轮播", "warn")
+            self._set_status("先把当前工程保存成 .hud.json 才能加入轮播", "warn")
             return
         try:
             self._playlist.add(self.project_path)
@@ -3736,7 +3736,7 @@ class App(tk.Tk):
     def _on_files_dropped(self, paths: list[str]) -> None:
         if not paths:
             return
-        project_exts = (".lg6.json", ".json")
+        project_exts = (".hud.json", ".json")
         image_exts = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
         gif_exts = (".gif",)
         video_exts = (".mp4", ".avi", ".webm", ".mov", ".mkv")
@@ -3842,8 +3842,8 @@ def _parse_control_reply(reply: bytes) -> tuple[str, int | None]:
 # --------------------------------------------------------------------------- #
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        prog="lg6studio",
-        description="LG600 Studio：TCOMAS LG600 屏幕的开源控制台（Tkinter GUI）",
+        prog="hydrohud",
+        description="HydroHUD：TCOMAS LG600 屏幕的开源控制台（Tkinter GUI）",
     )
     parser.add_argument(
         "--smoke-shot",
@@ -3851,13 +3851,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="启动后 1.2 秒把预览区截图保存为 PNG，再 0.4 秒自动退出（无人值守验证）",
     )
-    parser.add_argument("--project", metavar="PATH", default=None, help="启动时打开 .lg6.json 项目")
+    parser.add_argument("--project", metavar="PATH", default=None, help="启动时打开 .hud.json 项目")
     parser.add_argument(
         "--autostream",
         action="store_true",
         help="启动后自动开始推流（配合 --project 适合开机自启常驻）",
     )
-    parser.add_argument("--version", action="version", version=f"LG600 Studio {APP_VERSION}")
+    parser.add_argument("--version", action="version", version=f"HydroHUD {APP_VERSION}")
     return parser.parse_args(argv)
 
 
@@ -3869,7 +3869,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             diagnostics_mod.install()
         except Exception as exc:  # 日志装不上只影响排查
-            print(f"[lg6studio] 崩溃日志初始化失败：{exc}", file=sys.stderr)
+            print(f"[hydrohud] 崩溃日志初始化失败：{exc}", file=sys.stderr)
     try:
         app = App(smoke_shot=smoke)
     except Exception:

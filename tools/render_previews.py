@@ -1,6 +1,6 @@
 """生成预览图与性能基准：把内置预设和图片/GIF/视频背景各渲染成 PNG。
 
-用法（在 lg600-studio 目录下）::
+用法（在 HydroHUD 目录下）::
 
     C:\\Python314\\python.exe tools\\render_previews.py
 
@@ -14,7 +14,7 @@
 
 # MIT License
 #
-# Copyright (c) 2026 LG600 Studio contributors
+# Copyright (c) 2026 HydroHUD contributors
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -48,8 +48,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from lg6studio.render import load_font, render_scene  # noqa: E402
-from lg6studio.scenes import preset_scenes  # noqa: E402
+from hydrohud.render import load_font, render_scene  # noqa: E402
+from hydrohud.scenes import preset_scenes  # noqa: E402
 
 ASSETS_DIR = os.path.join(ROOT, "tools", "_assets")
 PREVIEW_DIR = os.path.join(ROOT, "preview")

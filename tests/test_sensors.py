@@ -1,4 +1,4 @@
-"""``lg6studio.sensors`` 的纯软件测试。
+"""``hydrohud.sensors`` 的纯软件测试。
 
 约定：所有底层读取器都用 monkeypatch 注入固定值，不依赖真实 GPU / 共享内存 /
 psutil 是否存在；唯一触碰真实系统的是末尾的"真实采样冒烟"，它只断言不抛异常、
@@ -19,7 +19,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from lg6studio import sensors  # noqa: E402
+from hydrohud import sensors  # noqa: E402
 
 #: 任务要求的 metric 全集。
 EXPECTED_METRICS = (

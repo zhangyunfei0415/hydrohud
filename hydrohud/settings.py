@@ -1,4 +1,4 @@
-"""应用配置读写：``%APPDATA%\\LG600Studio\\settings.json``。
+"""应用配置读写：``%APPDATA%\\HydroHUD\\settings.json``。
 
 设计要点：
 
@@ -16,13 +16,13 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-APP_DIR_NAME = "LG600Studio"
+APP_DIR_NAME = "HydroHUD"
 FILE_NAME = "settings.json"
 _TMP_PREFIX = ".settings-"
 
 
 def app_data_dir() -> Path:
-    """返回 ``%APPDATA%\\LG600Studio``；目录不存在时创建。"""
+    """返回 ``%APPDATA%\\HydroHUD``；目录不存在时创建。"""
     base = os.environ.get("APPDATA")
     if not base:
         base = str(Path.home() / "AppData" / "Roaming")

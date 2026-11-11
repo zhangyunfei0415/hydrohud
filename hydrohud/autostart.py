@@ -16,7 +16,7 @@ except ImportError:  # pragma: no cover - 非 Windows 平台
     winreg = None  # type: ignore[assignment]
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-RUN_VALUE = "LG600Studio"
+RUN_VALUE = "HydroHUD"
 LAUNCHER_NAME = "launcher.py"
 
 
@@ -26,7 +26,7 @@ def _quote(path: Path) -> str:
 
 
 def _launcher_path() -> Path:
-    """源码运行时 ``launcher.py`` 的路径（本文件位于 ``lg6studio/`` 下）。"""
+    """源码运行时 ``launcher.py`` 的路径（本文件位于 ``hydrohud/`` 下）。"""
     return Path(__file__).resolve().parent.parent / LAUNCHER_NAME
 
 
@@ -64,7 +64,7 @@ def build_command(
 ) -> str:
     """拼出注册表里要写的启动命令行。
 
-    - ``target`` 给定时直接作为可执行文件（通常是打包后的 ``LG600Studio.exe``）；
+    - ``target`` 给定时直接作为可执行文件（通常是打包后的 ``HydroHUD.exe``）；
     - frozen 模式（PyInstaller）默认用 ``sys.executable``；
     - 源码模式用 ``pythonw.exe``（或当前解释器）+ 仓库根目录的 ``launcher.py``；
     - ``autostream=True`` 追加 ``--autostream``，``project`` 追加 ``--project <path>``。

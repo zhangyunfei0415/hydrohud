@@ -19,7 +19,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable
 
-logger = logging.getLogger("lg6studio.tray")
+logger = logging.getLogger("hydrohud.tray")
 
 try:  # 非 Windows 平台仍允许 import，只是不可用
     from ctypes import wintypes
@@ -219,7 +219,7 @@ class TrayIcon:
         self,
         root: Any,
         icon_path: Path | None = None,
-        tooltip: str = "LG600 Studio",
+        tooltip: str = "HydroHUD",
         on_show: Callable[[], Any] | None = None,
         on_toggle: Callable[[], Any] | None = None,
         on_quit: Callable[[], Any] | None = None,

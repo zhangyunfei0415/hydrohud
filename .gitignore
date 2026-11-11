@@ -1,19 +1,24 @@
+# Python
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+venv/
+
+# PyInstaller
 build/
 dist/
 *.spec
 
-# 本地验证产生的截图
-smoke.png
-smoke-window.png
-exe-smoke.png
-exe-smoke-window.png
-live-*.png
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
 
-# 验证脚本产生的临时工程
-_verify-*.lg6.json
-smoke-v12*.png
-exe-v12*.png
+# 本地验证产生的截图与临时工程（不随仓库分发）
+smoke*.png
+shot*.png
+exe-*.png
+live-*.png
+_verify-*.hud.json
+*.lg6.json

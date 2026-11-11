@@ -29,7 +29,7 @@ sys.path.insert(0, str(ROOT))
 
 from PIL import Image, ImageDraw, ImageFont  # noqa: E402
 
-from lg6studio import device  # noqa: E402
+from hydrohud import device  # noqa: E402
 
 PHOTO = ROOT / "tools" / "_assets" / "demo_photo.png"
 FONT = "C:/Windows/Fonts/msyhbd.ttc"

@@ -1,8 +1,8 @@
-# LG600 Studio
+# HydroHUD
 
-**TCOMAS LG600（1A2C:1520）水冷头 480×480 屏幕的开源控制软件。** 图形界面、可自由导入图片 / GIF / 视频、可自己拼装画面（文字、时钟、系统监控、进度条），一键推流到屏幕。MIT 许可。
+**开源 USB 屏幕控制软件。** 把一体式水冷头 / 机箱副屏上的那块小屏幕，变成一个想显示什么就显示什么的显示器：图片、GIF、视频、时钟、系统状态、折线图、仪表盘，全部自己拼，30 fps 推流。MIT 许可，单文件 exe，不装驱动、不装 Python。
 
-官方 TCOMAS 软件只有少量预设素材；这个项目把屏幕协议完全解密后重写了一份，想显示什么就显示什么。
+首个目标机型是 **TCOMAS LG600**（1A2C:1520）水冷头的 480×480 屏 —— 官方软件只给少量固定素材，这里把 HID 协议完全逆向后重写了一份。协议与移植方法全部写进仓库，方便把同一套思路套到别的型号上。
 
 ![界面截图](assets/screenshot.png)
 
@@ -13,7 +13,27 @@
 
 </details>
 
-> 协议逆向记录见 [docs/PROTOCOL.md](docs/PROTOCOL.md)；同生态的另外两条路子：命令行版 [lg600.py](../lg600/lg600.py) 与 [liquidctl 驱动适配](../lg600/notes/liquidctl-adapter.md)。
+## 支持的屏幕
+
+| 型号 | USB ID | 传输 | 状态 |
+| --- | --- | --- | --- |
+| TCOMAS LG600（水冷头 480×480） | `1A2C:1520` | HID 报文 + JPEG | ✅ 真机验证 |
+| TCOMAS LG700 | `1A2C:151C` | 另一套 USB 实现 | ⬜ 未验证，欢迎贡献 |
+| 你的屏幕？ | — | — | 👉 见下方「给 agent 的提示词」 |
+
+协议笔记：[docs/PROTOCOL.md](docs/PROTOCOL.md)（报文格式、控制命令、逆向过程、踩过的坑）。同生态的另外两条路子：命令行版 [lg600.py](../lg600/lg600.py) 与 [liquidctl 驱动适配](../lg600/notes/liquidctl-adapter.md)。
+
+## 给 agent 的提示词（让别人也能适配自己的屏幕）
+
+仓库根目录的 [AGENTS.md](AGENTS.md) 是**写给编码 agent 的移植说明书**：硬约束、架构图、协议速查表、七步移植配方（识别设备 → Frida 抓包 → 判像素格式 → 写 transport → 注册设备 → 递增验证 → 写文档）、新增图层的完整改动清单、以及已经确定的硬件事实（哪些路走不通，别再试）。
+
+用法是把这几句话连同仓库丢给你的 agent：
+
+> 读 `AGENTS.md`。我有一块 XXX 屏幕（VID:PID = `xxxx:yyyy`），想把 HydroHUD 适配到它上面。
+> 按 §4 的七步配方做：先枚举设备确认接口和报文长度，再抓官方软件发的报文判断像素格式，
+> 然后写新的 transport 并跑 §6 的测试。每步做完告诉我结论，不要跳过验证顺序。
+
+这条路径本身就是项目的第二个目标：**协议知识和移植流程属于社区**，而不是锁在某个人脑子里。
 
 ---
 
@@ -27,23 +47,23 @@
 | **实时预览** | 480×480 所见即所得预览，动态内容 10–15 fps 刷新，显示当前单帧 JPEG 体积（超限标红） |
 | **推流** | 10 / 20 / 30 / 60 fps 可选，静态画面自动按 2 s 间隔重推（固件看门狗要求），支持停止与热更新（边改边播） |
 | **设备控制** | 亮度 0–100 滑块、开/关屏幕、方向设置、读取设备状态（旋转象限）、一键结束官方软件 |
-| **工程文件** | 画面保存为 `.lg6.json`，可分享、可版本管理 |
+| **工程文件** | 画面保存为 `.hud.json`，可分享、可版本管理 |
 | **省心功能**（v1.1） | 系统托盘常驻、全局热键、工程轮播、拖放导入文件、界面状态记忆、开机自启、崩溃日志、休眠唤醒自动重连 |
 
 ## 快速开始
 
 ### 方式一：直接跑 exe（推荐给普通用户）
 
-`dist\LG600Studio.exe`（单文件，约 72 MB）双击运行。**不需要安装 Python**，视频 / GIF 解码用的 ffmpeg 已内置。
+`dist\HydroHUD.exe`（单文件，约 72 MB）双击运行。**不需要安装 Python**，视频 / GIF 解码用的 ffmpeg 已内置。
 
 > 使用前请先退出官方 `TCOMAS` 软件（任务管理器里结束 `DeviceDriver.exe`），HID 设备同一时间只能被一个程序占用。
 
 ### 方式二：源码运行
 
 ```powershell
-cd lg600-studio
+cd HydroHUD
 C:\Python314\python.exe -m pip install -r requirements.txt
-C:\Python314\python.exe -m lg6studio
+C:\Python314\python.exe -m hydrohud
 ```
 
 Python 3.10+；Windows 10/11（协议基于 hid.dll，暂无 Linux/macOS 版本）。
@@ -52,14 +72,14 @@ Python 3.10+；Windows 10/11（协议基于 hid.dll，暂无 Linux/macOS 版本�
 
 ```powershell
 # 打开项目并立刻开始推流——适合放进「启动」文件夹，开机即显示画面
-LG600Studio.exe --autostream --project "D:\我的场景.lg6.json"
+HydroHUD.exe --autostream --project "D:\我的场景.hud.json"
 
-python -m lg6studio --autostream --project "D:\我的场景.lg6.json"
+python -m hydrohud --autostream --project "D:\我的场景.hud.json"
 ```
 
 | 参数 | 说明 |
 | --- | --- |
-| `--project PATH` | 启动时打开 `.lg6.json` 项目 |
+| `--project PATH` | 启动时打开 `.hud.json` 项目 |
 | `--autostream` | 启动后自动开始推流（默认不自动连设备） |
 | `--smoke-shot PNG` | 启动 1.2 s 后把预览区截图存 PNG，再 0.4 s 自动退出（用于无人值守验证，退出码 0） |
 
@@ -91,8 +111,8 @@ python -m lg6studio --autostream --project "D:\我的场景.lg6.json"
 | --- | --- |
 | **全局热键** | `Ctrl+Alt+S` 开始/停止推流；`Ctrl+Alt+N` 切换到轮播里的下一个工程；`Ctrl+Alt+L` 从托盘把窗口调出来。游戏全屏时也生效 |
 | **系统托盘** | 关窗口最小化到托盘继续推流（想彻底退出用「文件 → 退出」或托盘菜单的「退出程序」）；托盘右键菜单能直接开关推流、切下一个工程 |
-| **工程轮播** | 「轮播」菜单 → 「加入当前工程」，把多个 `.lg6.json` 排成列表 → 「开始轮播」；间隔在「设置间隔…」里改（3–3600 秒，默认 30 s） |
-| **拖放导入** | 把 `.lg6.json` 直接拖进窗口 = 打开工程；把 `.jpg/.png/.gif/.mp4` 拖进窗口 = 立刻变成背景 |
+| **工程轮播** | 「轮播」菜单 → 「加入当前工程」，把多个 `.hud.json` 排成列表 → 「开始轮播」；间隔在「设置间隔…」里改（3–3600 秒，默认 30 s） |
+| **拖放导入** | 把 `.hud.json` 直接拖进窗口 = 打开工程；把 `.jpg/.png/.gif/.mp4` 拖进窗口 = 立刻变成背景 |
 | **状态记忆** | 窗口位置大小、上次打开的工程、FPS、亮度、轮播间隔都会记住，下次启动自动恢复 |
 | **开机自启** | 「文件 → 开机自启」勾选：往 `HKCU\...\Run` 写一条 `--autostream` 命令，开机自动推上次的工程 |
 | **一键结束官方软件** | 「设备 → 结束官方 TCOMAS 软件」直接结束 `DeviceDriver.exe`，不用开任务管理器 |
@@ -139,8 +159,8 @@ GUI 之外还有两条路子：
 
 ## 更多玩法
 
-- **开机常驻系统监控**：右栏选「系统监控」预设 → 保存为 `监控.lg6.json` → 把
-  `LG600Studio.exe --autostream --project "D:\监控.lg6.json"` 的快捷方式丢进
+- **开机常驻系统监控**：右栏选「系统监控」预设 → 保存为 `监控.hud.json` → 把
+  `HydroHUD.exe --autostream --project "D:\监控.hud.json"` 的快捷方式丢进
   `shell:startup`（Win+R 输入）即可开机自动上屏。
 - **看 GPU 温度曲线**：选「性能曲线」预设，折线图会攒最近 120 个采样点；把窗口缩到托盘，
   屏幕照样每帧更新。
@@ -154,12 +174,12 @@ GUI 之外还有两条路子：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File build.ps1 -Clean
-# 产物：dist\LG600Studio.exe（单文件，约 72 MB，含 Tkinter / Pillow / imageio + ffmpeg）
+# 产物：dist\HydroHUD.exe（单文件，约 72 MB，含 Tkinter / Pillow / imageio + ffmpeg）
 ```
 
 无 Python 环境也能运行。首次启动会比源码方式慢 1–2 秒（单文件解包）。
 
-## 场景文件格式（`.lg6.json`）
+## 场景文件格式（`.hud.json`）
 
 ```json
 {
@@ -200,8 +220,8 @@ powershell -ExecutionPolicy Bypass -File build.ps1 -Clean
 ## 目录结构
 
 ```
-lg600-studio/
-├── lg6studio/
+HydroHUD/
+├── hydrohud/
 │   ├── device.py     USB HID 传输 + JPEG 编码 + 报文分帧（无 GUI 依赖）
 │   ├── render.py     场景 → 480×480 图像（7 类图层、GIF/视频背景、缓存）
 │   ├── scenes.py     场景 schema、11 个预设、工程文件读写
@@ -214,12 +234,12 @@ lg600-studio/
 │   ├── playlist.py   工程轮播列表
 │   ├── diagnostics.py 崩溃日志
 │   ├── app.py        Tkinter 界面
-│   └── __main__.py   python -m lg6studio 入口
+│   └── __main__.py   python -m hydrohud 入口
 ├── docs/PROTOCOL.md  屏幕 HID 协议逆向记录
 ├── ROADMAP.md        后续版本规划与待验证实验
 ├── tests/            pytest 用例（184 项：渲染、图表/仪表、场景、传感器、模块、报文分帧）
 ├── preview/          预设渲染预览图（contact-sheet.png 是总览）
-├── examples/         示例工程 .lg6.json
+├── examples/         示例工程 .hud.json
 ├── assets/           图标、界面截图
 ├── tools/            预览图 / 测试素材 / 真机自检脚本
 ├── launcher.py       PyInstaller 入口

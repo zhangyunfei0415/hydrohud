@@ -10,8 +10,8 @@
 设计要点：
 
 * ``t`` 是流媒体时间轴（秒）：GIF / 视频背景按 ``t`` 取帧并循环播放，
-  时钟取当前本地时间，系统监控 / 折线图 / 仪表取 :mod:`lg6studio.sensors` 的
-  :class:`~lg6studio.sensors.SensorHub`（模块缺失时整层降级为 "—" / 0）。
+  时钟取当前本地时间，系统监控 / 折线图 / 仪表取 :mod:`hydrohud.sensors` 的
+  :class:`~hydrohud.sensors.SensorHub`（模块缺失时整层降级为 "—" / 0）。
 * 图层类型：``text`` / ``clock`` / ``sysinfo`` / ``bars`` / ``chart`` / ``gauge``
   / ``image``；含 ``{metric}`` 占位符的 text 图层按动态图层处理，每帧替换占位符
   后仍按最终字符串走图层缓存，不会重复真重绘。
@@ -25,7 +25,7 @@
 
 # MIT License
 #
-# Copyright (c) 2026 LG600 Studio contributors
+# Copyright (c) 2026 HydroHUD contributors
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -278,7 +278,7 @@ try:  # 传感器模块是可选的：缺失时 sysinfo / bars / chart / gauge �
 except Exception:  # noqa: BLE001 - 任何导入失败都视为没有传感器模块
     _sensors = None
 
-#: 进程级 :class:`~lg6studio.sensors.SensorHub` 缓存，首次真正渲染时才懒创建
+#: 进程级 :class:`~hydrohud.sensors.SensorHub` 缓存，首次真正渲染时才懒创建
 #: （import 时绝不调用 ``get_hub()``，测试可把它替换成假 hub）。
 _sensor_hub: Any = None
 _hub_lock = threading.Lock()

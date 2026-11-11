@@ -1,4 +1,4 @@
-# LG600 Studio 路线图
+# HydroHUD 路线图
 
 v1.2.0 在 v1.1 的基础上补上了「系统状态」这条主线：23 项指标采集、折线图/环形仪表盘/状态模板等新图层，屏幕终于能表达信息而不只是贴图。这份文档规划之后往哪儿长：哪些是顺手就能做的小改进，哪些要依赖协议层再做实验，哪些属于长期生态建设。
 
@@ -17,7 +17,7 @@ v1.2.0 在 v1.1 的基础上补上了「系统状态」这条主线：23 项指�
 | 预览 | 480×480，约 16 fps，显示渲染耗时与帧体积 |
 | 推流 | 10/20/30/60 fps，绝对截止时刻调度，实测 **29.8–30.0 fps**；静态场景按 2 s 重推对抗看门狗；后台线程，窗口可最小化 |
 | 设备控制 | 亮度、开/关屏、读状态（441 字节回复）、方向设置（只存配置）、一键结束官方软件 |
-| 工程 | `.lg6.json` 工程文件；**11 个中文预设**；`--autostream` 开机自启 |
+| 工程 | `.hud.json` 工程文件；**11 个中文预设**；`--autostream` 开机自启 |
 | 常驻能力（v1.1） | 系统托盘、全局热键、工程轮播、拖放导入、界面状态记忆、开机自启开关、崩溃日志、休眠唤醒自动重连 |
 | 分发 | PyInstaller 单文件 exe（约 73 MB）；**184 项 pytest**；`tools/check_device.py` 硬件自检、`tools/verify_v11.py` 真机帧率回归 |
 | 协议文档 | 仓库内 `docs/PROTOCOL.md` |
@@ -57,14 +57,14 @@ v1.2.0 在 v1.1 的基础上补上了「系统状态」这条主线：23 项指�
 
 | 功能 | 落地做法 | 状态 |
 | --- | --- | --- |
-| 系统托盘 | `lg6studio/tray.py`：message-only 窗口 + `Shell_NotifyIconW`（不引入 pystray），关窗进托盘，菜单：显示窗口/开始·停止推流/下一个工程/退出 | ✅ |
-| 工程轮播（播放列表） | `lg6studio/playlist.py` 环形列表 + `App._playlist_tick`；切换时不停流，列表与间隔持久化 | ✅ |
-| 全局热键 | `lg6studio/hotkeys.py`：`RegisterHotKey` + `PeekMessageW` 泵；`Ctrl+Alt+S` 开关推流、`Ctrl+Alt+N` 下一个工程、`Ctrl+Alt+L` 显示窗口 | ✅ |
-| 拖放导入 | `WM_DROPFILES` 子类化窗口过程：`.lg6.json` 打开工程，图片/GIF/视频直接设为背景 | ✅ |
-| 界面记忆 | `lg6studio/settings.py` 原子写 `%APPDATA%\LG600Studio\settings.json`（窗口几何、工程、FPS、亮度、轮播间隔） | ✅ |
-| 一键开机自启 | `lg6studio/autostart.py` 写 `HKCU\...\Run`（比 `shell:startup` 快捷方式更可控、可读回校验），命令行带 `--autostream --project` | ✅ |
+| 系统托盘 | `hydrohud/tray.py`：message-only 窗口 + `Shell_NotifyIconW`（不引入 pystray），关窗进托盘，菜单：显示窗口/开始·停止推流/下一个工程/退出 | ✅ |
+| 工程轮播（播放列表） | `hydrohud/playlist.py` 环形列表 + `App._playlist_tick`；切换时不停流，列表与间隔持久化 | ✅ |
+| 全局热键 | `hydrohud/hotkeys.py`：`RegisterHotKey` + `PeekMessageW` 泵；`Ctrl+Alt+S` 开关推流、`Ctrl+Alt+N` 下一个工程、`Ctrl+Alt+L` 显示窗口 | ✅ |
+| 拖放导入 | `WM_DROPFILES` 子类化窗口过程：`.hud.json` 打开工程，图片/GIF/视频直接设为背景 | ✅ |
+| 界面记忆 | `hydrohud/settings.py` 原子写 `%APPDATA%\HydroHUD\settings.json`（窗口几何、工程、FPS、亮度、轮播间隔） | ✅ |
+| 一键开机自启 | `hydrohud/autostart.py` 写 `HKCU\...\Run`（比 `shell:startup` 快捷方式更可控、可读回校验），命令行带 `--autostream --project` | ✅ |
 | 官方软件检测与一键结束 | `device.vendor_processes()/kill_vendor_software()` + 「设备 → 结束官方 TCOMAS 软件」 | ✅ |
-| 崩溃/异常日志 | `lg6studio/diagnostics.py`：按天日志、接管 `sys.excepthook`/`threading.excepthook`/Tk 回调异常，「帮助 → 打开日志目录」 | ✅ |
+| 崩溃/异常日志 | `hydrohud/diagnostics.py`：按天日志、接管 `sys.excepthook`/`threading.excepthook`/Tk 回调异常，「帮助 → 打开日志目录」 | ✅ |
 | 休眠唤醒重连 | 推流线程捕获 `OSError` → `Screen.reopen()`（重新枚举接口，路径变化也能接上），最多重试 3 次 | ✅ |
 | 帧率打满 30 | 帧调度改为**绝对截止时刻**累加（逐帧 `wait(1/fps)` 的实际开销会把 30 fps 拖到 20 fps）；实测 29.8–30.0 fps | ✅ |
 
@@ -78,7 +78,7 @@ v1.2.0 在 v1.1 的基础上补上了「系统状态」这条主线：23 项指�
 
 | 功能 | 落地做法 | 状态 |
 | --- | --- | --- |
-| 硬件传感器接入 | `lg6studio/sensors.py`：23 项指标。GPU 直调 `nvml.dll`（占用/温度/显存/功耗/风扇/频率），CPU/内存/磁盘/网络走 ctypes（`GetSystemTimes`/`GlobalMemoryStatusEx`/`GetDiskFreeSpaceExW`/`GetIfTable2`，有 psutil 则优先），CPU 温度/功耗/风扇从 LHM/HWiNFO 共享内存读、缺失显示「—」；`SensorHub` 0.5 s 节流采样 + 120 点环形历史 | ✅ |
+| 硬件传感器接入 | `hydrohud/sensors.py`：23 项指标。GPU 直调 `nvml.dll`（占用/温度/显存/功耗/风扇/频率），CPU/内存/磁盘/网络走 ctypes（`GetSystemTimes`/`GlobalMemoryStatusEx`/`GetDiskFreeSpaceExW`/`GetIfTable2`，有 psutil 则优先），CPU 温度/功耗/风扇从 LHM/HWiNFO 共享内存读、缺失显示「—」；`SensorHub` 0.5 s 节流采样 + 120 点环形历史 | ✅ |
 | 折线图图层 | `chart`：指标历史曲线，圆角背景 + 网格 + 渐变面积 + 平滑折线 + 左上角标题；可配指标/宽高/颜色/填充/背景/网格/点数 | ✅ |
 | 环形仪表盘图层 | `gauge`：270° 弧 + 2× 超采样抗锯齿 + 圆心大数字 + 上方标签；自动按指标量程归一化 | ✅ |
 | 状态文字支持任意指标 | `sysinfo`/`bars` 从固定 cpu/ram 改为任意 23 项指标（最多 8 项/图层），编辑界面用勾选对话框选 | ✅ |
@@ -96,7 +96,7 @@ v1.2.0 在 v1.1 的基础上补上了「系统状态」这条主线：23 项指�
 | 正在播放 | Windows SMTC（`winsdk` 可选依赖）：歌名/歌手/封面；未安装则隐藏 | 1.5 |
 | 天气 / 空气质量 | Open-Meteo（免 key）定时拉取，缓存 + 离线降级 | 1 |
 | 屏幕区域捕获 | `ImageGrab.grab(bbox)` 作为背景（低帧率，如 5 fps），可做"屏幕镜像" | 1 |
-| 主题包导入导出 | 把工程 + 引用的图片字体打包成 `.lg6pack`（zip），一键导入 | 0.5 |
+| 主题包导入导出 | 把工程 + 引用的图片字体打包成 `.hudpack`（zip），一键导入 | 0.5 |
 | 官方素材导入 | 扫描 `C:\Program Files (x86)\TcomasSoftware\led*/` 与用户目录 `led_file\*.gif`，一键加为预设（只读，不修改官方文件） | 0.5 |
 
 ### v1.3「性能与协议深挖」— 画质、帧率、开机图（约 8 人日）
@@ -126,9 +126,9 @@ v1.2.0 在 v1.1 的基础上补上了「系统状态」这条主线：23 项指�
 
 | 项目 | 内容 | 工作量 |
 | --- | --- | --- |
-| 图层插件 API | `LayerProvider` 协议：`render(canvas, layer, ctx)` + JSON schema 声明参数；插件放 `%APPDATA%\LG600Studio\plugins`，界面自动生成参数表单 | 4 |
+| 图层插件 API | `LayerProvider` 协议：`render(canvas, layer, ctx)` + JSON schema 声明参数；插件放 `%APPDATA%\HydroHUD\plugins`，界面自动生成参数表单 | 4 |
 | 插件沙箱与验收 | 插件只在渲染线程调用、限时、异常隔离；安装前展示声明权限 | 2 |
-| 本地 API | HTTP/WebSocket（`127.0.0.1`，token 保护）：推场景、改亮度、读状态；配套 `lg6ctl` CLI 与 Home Assistant 插件 | 3 |
+| 本地 API | HTTP/WebSocket（`127.0.0.1`，token 保护）：推场景、改亮度、读状态；配套 `hudctl` CLI 与 Home Assistant 插件 | 3 |
 | 社区预设库 | 远程 JSON 索引 + 一键下载（纯数据，不执行代码），带缩略图与评分字段 | 2 |
 | 自动发布流水线 | GitHub Actions：`pytest` + `black` + 打包 exe + 附件发布 + 变更日志 | 2 |
 | 代码签名 | 减少 SmartScreen/杀软误报（需代码签名证书，用户自行决定是否购买） | 1 |

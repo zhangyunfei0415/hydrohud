@@ -17,7 +17,7 @@
 
 # MIT License
 #
-# Copyright (c) 2026 LG600 Studio contributors
+# Copyright (c) 2026 HydroHUD contributors
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -418,7 +418,7 @@ def normalize_scene(scene: dict) -> dict:
 
     参数 ``scene`` 可以是任意字典（甚至 ``None``）；缺失字段用预设默认值补齐，
     未知字段和未知图层类型被忽略，因此不会抛异常。返回值可直接用于
-    :func:`lg6studio.render.render_scene` 以及保存项目。
+    :func:`hydrohud.render.render_scene` 以及保存项目。
     """
     raw = _as_dict(scene)
 
@@ -488,7 +488,7 @@ def preset_scenes() -> dict[str, dict]:
             ),
             _layer(
                 "text",
-                text="LG600 STUDIO",
+                text="HYDROHUD",
                 x=0.5,
                 y=0.88,
                 size=22,
@@ -851,7 +851,7 @@ def preset_scenes() -> dict[str, dict]:
 
 
 def load_project(path: str) -> dict:
-    """读取 ``.lg6.json`` 项目文件并返回规范化场景。
+    """读取 ``.hud.json`` 项目文件并返回规范化场景。
 
     文件不存在抛 :class:`FileNotFoundError`；JSON 非法或顶层不是对象时抛
     :class:`ValueError`（中文错误信息，GUI 可直接展示）。
@@ -872,7 +872,7 @@ def load_project(path: str) -> dict:
 
 
 def save_project(scene: dict, path: str) -> None:
-    """把场景规范化后写入 ``.lg6.json``（UTF-8、缩进 2、原子替换）。"""
+    """把场景规范化后写入 ``.hud.json``（UTF-8、缩进 2、原子替换）。"""
     if not path:
         raise ValueError("项目路径为空")
     normalized = normalize_scene(scene)
@@ -880,7 +880,7 @@ def save_project(scene: dict, path: str) -> None:
     if directory:
         os.makedirs(directory, exist_ok=True)
     payload = json.dumps(normalized, ensure_ascii=False, indent=2) + "\n"
-    fd, temp_path = tempfile.mkstemp(prefix=".lg6-", suffix=".json", dir=directory)
+    fd, temp_path = tempfile.mkstemp(prefix=".hud-", suffix=".json", dir=directory)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(payload)

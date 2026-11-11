@@ -20,8 +20,8 @@ a 640x640 JPEG stalls the USB endpoint and the panel drops off the bus.
 The panel has a watchdog: it blanks a few seconds after the stream stops, so a
 still image has to be retransmitted continuously (see `Screen.keepalive`).
 
-This module is a dependency-free port of the verified prototype in
-``D:\\AIimagine\\lg600\\lg600.py``: it talks to hid.dll through ctypes.
+This module is a dependency-free port of a verified standalone prototype: it
+talks to hid.dll through ctypes.
 """
 
 from __future__ import annotations

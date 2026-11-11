@@ -1,9 +1,9 @@
 <#
 .SYNOPSIS
-    Build LG600Studio.exe with PyInstaller.
+    Build HydroHUD.exe with PyInstaller.
 
 .DESCRIPTION
-    Produces a single windowed executable in `dist\LG600Studio.exe`. The build
+    Produces a single windowed executable in `dist\HydroHUD.exe`. The build
     bundles Python, Tkinter, Pillow, imageio and its ffmpeg binary, so the result
     runs on a machine without Python installed.
 
@@ -39,7 +39,7 @@ if ($Clean) {
     foreach ($path in @("build", "dist")) {
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
     }
-    foreach ($path in @("LG600Studio.spec")) {
+    foreach ($path in @("HydroHUD.spec")) {
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
     }
 }
@@ -63,11 +63,11 @@ $args = @(
     "--clean",
     "--onefile",
     "--windowed",
-    "--name", "LG600Studio",
+    "--name", "HydroHUD",
     "--icon", "assets\app.ico",
     "--add-data", "assets;assets",
     "--collect-all", "imageio_ffmpeg",
-    "--collect-submodules", "lg6studio",
+    "--collect-submodules", "hydrohud",
     "--hidden-import", "PIL._tkinter_finder",
     "launcher.py"
 )
@@ -76,7 +76,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller failed with exit code $LASTEXITCODE"
 }
 
-$exe = Join-Path $PSScriptRoot "dist\LG600Studio.exe"
+$exe = Join-Path $PSScriptRoot "dist\HydroHUD.exe"
 if (-not (Test-Path -LiteralPath $exe)) {
     throw "Build finished but $exe is missing."
 }
