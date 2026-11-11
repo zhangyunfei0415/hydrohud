@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "name": "系统监控",
+  "background": {
+    "type": "solid",
+    "color": "#050A12",
+    "path": "",
+    "fit": "crop"
+  },
+  "tint": {
+    "color": "#0EA5E9",
+    "alpha": 0.08
+  },
+  "layers": [
+    {
+      "x": 0.5,
+      "y": 0.09,
+      "anchor": "center",
+      "type": "text",
+      "text": "系统监控",
+      "size": 32,
+      "color": "#94A3B8",
+      "bold": false,
+      "align": "center",
+      "shadow": true
+    },
+    {
+      "x": 0.5,
+      "y": 0.24,
+      "anchor": "center",
+      "type": "sysinfo",
+      "fields": [
+        "cpu",
+        "ram"
+      ],
+      "size": 36,
+      "color": "#22D3EE",
+      "bold": true,
+      "shadow": true,
+      "separator": "    "
+    },
+    {
+      "x": 0.1,
+      "y": 0.44,
+      "anchor": "center",
+      "type": "bars",
+      "items": [
+        "cpu",
+        "ram"
+      ],
+      "w": 0.8,
+      "h": 0.15,
+      "gap": 0.015,
+      "color": "#22D3EE",
+      "color2": "#A78BFA",
+      "bg": "#0F172A",
+      "label": true,
+      "label_color": "#E2E8F0",
+      "size": 22,
+      "radius": 1.0
+    },
+    {
+      "x": 0.5,
+      "y": 0.9,
+      "anchor": "center",
+      "type": "text",
+      "text": "LG600 · 480×480",
+      "size": 20,
+      "color": "#475569",
+      "bold": false,
+      "align": "center",
+      "shadow": true
+    }
+  ]
+}

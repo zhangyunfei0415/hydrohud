@@ -2809,7 +2809,9 @@ class App(tk.Tk):
             screen.open()
             self._post("stream_state", "streaming")
             timeline = time.monotonic()
-            last_stats = 0.0
+            last_stats = timeline
+            stats_frames = 0
+            stats_time = timeline
             while not self._stream_stop.is_set():
                 scene = self._snapshot_scene()
                 dynamic = scene_is_dynamic(scene)
@@ -2834,8 +2836,13 @@ class App(tk.Tk):
                 now = time.monotonic()
                 if now - last_stats >= 0.4:
                     last_stats = now
-                    elapsed = max(0.001, now - self._stream_started_at)
-                    self._post("stream_stats", frame_count, frame_count / elapsed)
+                    # fps over the last window, not since the stream started, so the
+                    # number reacts to changes instead of averaging them away.
+                    window = max(0.001, now - stats_time)
+                    achieved = (frame_count - stats_frames) / window
+                    stats_frames = frame_count
+                    stats_time = now
+                    self._post("stream_stats", frame_count, achieved)
         except Exception as exc:
             error_message = friendly_device_error(exc)
             _warn_once(f"推流线程异常：{exc}")

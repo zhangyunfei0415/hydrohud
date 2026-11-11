@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "name": "极简时钟",
+  "background": {
+    "type": "solid",
+    "color": "#0B0F14",
+    "path": "",
+    "fit": "crop"
+  },
+  "tint": {
+    "color": "#000000",
+    "alpha": 0.0
+  },
+  "layers": [
+    {
+      "x": 0.5,
+      "y": 0.45,
+      "anchor": "center",
+      "type": "clock",
+      "format": "%H:%M",
+      "show_date": true,
+      "date_format": "%Y-%m-%d",
+      "date_size": 39,
+      "size": 150,
+      "color": "#F8FAFC",
+      "bold": true,
+      "shadow": true
+    },
+    {
+      "x": 0.5,
+      "y": 0.88,
+      "anchor": "center",
+      "type": "text",
+      "text": "LG600 STUDIO",
+      "size": 22,
+      "color": "#64748B",
+      "bold": false,
+      "align": "center",
+      "shadow": false
+    }
+  ]
+}
