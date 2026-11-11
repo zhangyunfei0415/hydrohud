@@ -35,7 +35,7 @@ from functools import lru_cache
 from typing import Any, Callable
 
 import tkinter as tk
-from tkinter import colorchooser, filedialog, messagebox, ttk
+from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 from tkinter import font as tkfont
 
 from PIL import Image, ImageDraw, ImageFont, ImageTk
@@ -105,6 +105,12 @@ device_mod = _import_optional("device")
 render_mod = _import_optional("render")
 scenes_mod = _import_optional("scenes")
 sysmon_mod = _import_optional("sysmon")
+settings_mod = _import_optional("settings")
+autostart_mod = _import_optional("autostart")
+tray_mod = _import_optional("tray")
+hotkeys_mod = _import_optional("hotkeys")
+playlist_mod = _import_optional("playlist")
+diagnostics_mod = _import_optional("diagnostics")
 
 try:  # 版本号来自包 __init__，缺失时退回内置值
     from . import __version__ as APP_VERSION
@@ -112,11 +118,15 @@ except Exception:  # pragma: no cover - 直接运行 app.py 时没有包上下�
     APP_VERSION = "1.0.0"
 
 SCREEN_SIZE = 480
-MAX_JPEG_BYTES = int(getattr(device_mod, "MAX_FRAME_BYTES", 15300)) if device_mod else 15300
+MAX_JPEG_BYTES = int(getattr(device_mod, "MAX_FRAME_BYTES", 46920)) if device_mod else 46920
 STATIC_REFRESH_SECONDS = 2.0
 PREVIEW_INTERVAL_MS = 60
 PREVIEW_STREAMING_INTERVAL_MS = 220
 RECONNECT_HINT = "提示：官方 TCOMAS 软件（DeviceDriver.exe）运行时设备被占用，请先退出官方软件。"
+PLAYLIST_DEFAULT_INTERVAL = 30.0
+HOTKEY_TOGGLE_STREAM = "ctrl+alt+s"
+HOTKEY_NEXT_PROJECT = "ctrl+alt+n"
+HOTKEY_SHOW_WINDOW = "ctrl+alt+l"
 
 # --------------------------------------------------------------------------- #
 # 主题
@@ -654,7 +664,7 @@ class RenderWorker:
                 jpeg_error = ""
                 try:
                     jpeg_len = len(self.app.encode_frame(image))
-                except Exception as exc:  # JPEG 压不进 15300 字节也要继续显示预览
+                except Exception as exc:  # JPEG 压不进帧预算也要继续显示预览
                     jpeg_len = None
                     jpeg_error = str(exc)
                 item: tuple = (
@@ -738,6 +748,14 @@ class App(tk.Tk):
         self._layer_up_btn: ttk.Button | None = None
         self._layer_down_btn: ttk.Button | None = None
         self._layer_delete_btn: ttk.Button | None = None
+        self._tray: Any | None = None
+        self._hotkeys: Any | None = None
+        self._playlist: Any | None = None
+        self._playlist_job: object | None = None
+        self._playlist_active = False
+        self._drop_proc: Any | None = None
+        self._drop_hwnd: int | None = None
+        self._hotkey_ok: list[str] = []
 
         self.scene: dict = self._initial_scene()
 
@@ -769,6 +787,7 @@ class App(tk.Tk):
 
         if self.smoke_shot:
             self._schedule_smoke()
+        self._init_convenience()
         if _LOAD_WARNINGS:
             detail = "；".join(_LOAD_WARNINGS)
             print(f"[lg6studio] 可选模块告警：{detail}", file=sys.stderr)
@@ -970,18 +989,41 @@ class App(tk.Tk):
             label="另存为…", accelerator="Ctrl+Shift+S", command=self._on_save_project_as
         )
         file_menu.add_separator()
+        self._autostart_var = tk.BooleanVar(value=False)
+        file_menu.add_checkbutton(
+            label="开机自启（自动推流上次工程）",
+            variable=self._autostart_var,
+            command=self._on_toggle_autostart,
+        )
+        file_menu.add_separator()
         file_menu.add_command(label="退出", command=self.on_close)
         menubar.add_cascade(label="文件", menu=file_menu)
+
+        playlist_menu = tk.Menu(menubar, **menu_options)
+        playlist_menu.add_command(label="加入当前工程到轮播", command=self._on_add_to_playlist)
+        playlist_menu.add_command(label="开始 / 停止轮播", command=self._on_toggle_playlist)
+        playlist_menu.add_command(label="立即切换到下一个", command=self._on_next_project)
+        playlist_menu.add_separator()
+        playlist_menu.add_command(label="设置轮播间隔…", command=self._on_playlist_interval)
+        playlist_menu.add_command(label="清空轮播列表", command=self._on_clear_playlist)
+        menubar.add_cascade(label="轮播", menu=playlist_menu)
 
         device_menu = tk.Menu(menubar, **menu_options)
         device_menu.add_command(label="检测设备（只枚举，不打开）", command=self._on_detect)
         device_menu.add_command(label="读取设备状态", command=self._on_query)
+        device_menu.add_command(label="结束官方 TCOMAS 软件", command=self._on_kill_vendor)
         device_menu.add_separator()
         device_menu.add_command(label="开始推送到屏幕", command=self._on_start_stream)
         device_menu.add_command(label="停止推送", command=self._on_stop_stream)
         menubar.add_cascade(label="设备", menu=device_menu)
 
+        window_menu = tk.Menu(menubar, **menu_options)
+        window_menu.add_command(label="隐藏到系统托盘", command=self._hide_to_tray)
+        window_menu.add_command(label="显示窗口", command=self._show_window)
+        menubar.add_cascade(label="窗口", menu=window_menu)
+
         help_menu = tk.Menu(menubar, **menu_options)
+        help_menu.add_command(label="打开日志目录", command=self._open_log_folder)
         help_menu.add_command(label="关于 LG600 Studio", command=self._on_about)
         menubar.add_cascade(label="帮助", menu=help_menu)
         self.configure(menu=menubar)
@@ -2802,6 +2844,35 @@ class App(tk.Tk):
         frame_count = 0
         static_jpeg: bytes | None = None
         static_scene: dict | None = None
+
+        def push(jpeg_bytes: bytes) -> bool:
+            """写一帧；设备掉线（休眠唤醒、USB 重新枚举）时重连并重试。
+
+            返回 True 表示这一帧最终没能写入、且用户已经要求停止。
+            """
+            for attempt in range(4):
+                try:
+                    screen.send_jpeg(jpeg_bytes)
+                    if attempt:
+                        self._post("stream_msg", "设备已重新连接，继续推流", "info")
+                    return False
+                except OSError as exc:
+                    if attempt == 3:
+                        raise
+                    self._post(
+                        "stream_msg",
+                        f"设备断开（{exc}），正在重连 {attempt + 1}/3…",
+                        "warn",
+                    )
+                    self._update_tray_tooltip("LG600 Studio · 正在重连屏幕…")
+                    if self._stream_stop.wait(min(0.6 * (attempt + 1), 2.0)):
+                        return True
+                    try:
+                        screen.reopen()
+                    except Exception as reopen_exc:  # 设备还没回来，等下一轮
+                        _warn_once(f"重连失败：{reopen_exc}")
+            return False
+
         try:
             fps = self._stream_fps
             self._post("stream_msg", "正在打开图像接口（MI_01）…", "info")
@@ -2812,17 +2883,26 @@ class App(tk.Tk):
             last_stats = timeline
             stats_frames = 0
             stats_time = timeline
+            # 帧间隔按"绝对截止时刻"推进而不是每帧睡 interval：Event.wait 实际会多睡
+            # 几毫秒（GIL 争用 + 定时器粒度），逐帧累加会把 30 fps 拖到 20 fps 上下；
+            # 用截止时刻累加则超时只影响单帧，平均帧率仍然收敛到目标。
+            period = 1.0 / fps
+            deadline = time.monotonic()
             while not self._stream_stop.is_set():
                 scene = self._snapshot_scene()
                 dynamic = scene_is_dynamic(scene)
                 if dynamic:
-                    frame_started = time.monotonic()
                     image = self.render_frame(scene, time.monotonic() - timeline)
                     jpeg = self.encode_frame(image)
-                    screen.send_jpeg(jpeg)
+                    if push(jpeg):
+                        break
                     frame_count += 1
-                    interval = 1.0 / fps
-                    remaining = interval - (time.monotonic() - frame_started)
+                    deadline += period
+                    now = time.monotonic()
+                    if now > deadline + period * 3:
+                        # 落后太多（编码卡顿、设备重连）就重新对齐，避免追帧风暴。
+                        deadline = now
+                    remaining = deadline - now
                     if remaining > 0:
                         self._stream_stop.wait(remaining)
                 else:
@@ -2830,7 +2910,8 @@ class App(tk.Tk):
                         image = self.render_frame(scene, time.monotonic() - timeline)
                         static_jpeg = self.encode_frame(image)
                         static_scene = copy.deepcopy(scene)
-                    screen.send_jpeg(static_jpeg)
+                    if push(static_jpeg):
+                        break
                     frame_count += 1
                     self._stream_stop.wait(STATIC_REFRESH_SECONDS)
                 now = time.monotonic()
@@ -2890,10 +2971,12 @@ class App(tk.Tk):
             if state == "streaming":
                 self._set_connection("● 正在推流", ACCENT_2)
                 self._update_stream_buttons(True)
+                self._update_tray_tooltip(f"LG600 Studio · 正在推流（{frames} 帧）")
                 self._set_status(f"正在推送画面（{self._stream_fps:.0f} fps 目标）…", "stream")
             else:
                 self._stream_thread = None
                 self._update_stream_buttons(False)
+                self._update_tray_tooltip(f"LG600 Studio · 已停止（共 {frames} 帧）")
                 if error:
                     self._set_connection("● 设备异常", ERR)
                     self._set_status(str(error), "error")
@@ -2910,6 +2993,9 @@ class App(tk.Tk):
             frames = int(payload[0])
             fps = float(payload[1])
             self._stream_frames = frames
+            if self.smoke_shot:
+                # 无人值守验证时把帧数打到 stdout，让外部脚本能判定真的在推流。
+                print(f"[smoke] 已推 {frames} 帧 · {fps:.1f} fps", flush=True)
             if self._frames_label is not None:
                 self._frames_label.configure(text=f"已推 {frames} 帧 · {fps:.1f} fps")
         elif kind == "control_reply":
@@ -2927,6 +3013,11 @@ class App(tk.Tk):
     def _on_tk_callback_error(self, exc_type: Any, exc: BaseException, tb: Any) -> None:
         """Tk 回调里的未捕获异常：提示到状态栏而不是弹出崩溃窗口。"""
         summary = "".join(traceback.format_exception_only(exc_type, exc)).strip()
+        try:
+            if diagnostics_mod is not None:
+                diagnostics_mod.log_exception(exc, "tk-callback")
+        except Exception:  # 记日志失败不该再抛一次
+            pass
         try:
             self._set_status(f"界面异常已捕获：{summary}", "error")
         except Exception:
@@ -3002,6 +3093,23 @@ class App(tk.Tk):
         if self._closing:
             return
         self._closing = True
+        self._playlist_active = False
+        try:
+            self._save_state()
+        except Exception:  # 设置保存失败不能阻止退出
+            pass
+        try:
+            if self._tray is not None:
+                self._tray.stop()
+                self._tray = None
+        except Exception:
+            pass
+        try:
+            if self._hotkeys is not None:
+                self._hotkeys.unregister_all()
+                self._hotkeys = None
+        except Exception:
+            pass
         try:
             if self._stream_thread is not None and self._stream_thread.is_alive():
                 self._stream_stop.set()
@@ -3026,6 +3134,480 @@ class App(tk.Tk):
         """供 main() 的 finally 使用的幂等清理。"""
         if not self._closing:
             self.on_close()
+
+    # ------------------------------------------------------------------ #
+    # v1.1「顺手」：崩溃日志 / 状态记忆 / 托盘 / 热键 / 轮播 / 拖放 / 自启
+    # ------------------------------------------------------------------ #
+    def _init_convenience(self) -> None:
+        """初始化不影响主流程的顺手能力；任何一项失败都只降级，不阻止启动。"""
+        if diagnostics_mod is not None:
+            try:
+                diagnostics_mod.install_tk_handler(self)
+            except Exception as exc:  # 日志装不上只影响排查，不影响使用
+                _warn_once(f"崩溃日志初始化失败：{exc}")
+        self._restore_state()
+        self._init_tray()
+        self._init_hotkeys()
+        self._load_playlist()
+        self._install_drop_target()
+        self._refresh_autostart_var()
+
+    # ---- 界面状态记忆 ------------------------------------------------- #
+    def _restore_state(self) -> None:
+        if settings_mod is None:
+            return
+        try:
+            data = settings_mod.load()
+        except Exception as exc:
+            _warn_once(f"读取设置失败：{exc}")
+            return
+        geometry = data.get("geometry")
+        if isinstance(geometry, str) and geometry:
+            try:
+                self.geometry(geometry)
+            except tk.TclError:
+                pass
+        fps = data.get("fps")
+        if str(fps) in ("10", "20", "30", "60"):
+            self._fps_var.set(str(fps))
+        brightness = data.get("brightness")
+        if isinstance(brightness, (int, float)):
+            self._bright_var.set(float(max(0.0, min(100.0, float(brightness)))))
+        project = data.get("project")
+        if isinstance(project, str) and project and os.path.isfile(project):
+            self.load_project(project, notify=False)
+        self._set_status("已恢复上次界面状态", "info")
+
+    def _save_state(self) -> None:
+        if settings_mod is None:
+            return
+        try:
+            data = settings_mod.load()
+        except Exception:
+            data = {}
+        try:
+            data["geometry"] = self.winfo_geometry()
+        except tk.TclError:
+            pass
+        if self.project_path:
+            data["project"] = self.project_path
+        try:
+            data["fps"] = self._fps_var.get()
+            data["brightness"] = float(self._bright_var.get())
+        except (tk.TclError, TypeError, ValueError):
+            pass
+        if self._playlist is not None:
+            try:
+                data["playlist_interval"] = float(self._playlist.interval)
+            except (AttributeError, TypeError, ValueError):
+                pass
+        data["last_used"] = int(time.time())
+        try:
+            settings_mod.save(data)
+        except Exception as exc:  # 设置写不进去不影响退出
+            _warn_once(f"保存设置失败：{exc}")
+
+    # ---- 系统托盘 ------------------------------------------------------ #
+    def _tray_icon_path(self) -> str | None:
+        candidates = [
+            os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", "app.ico"
+            ),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "app.ico"),
+        ]
+        for path in candidates:
+            if os.path.isfile(path):
+                return path
+        return None
+
+    def _init_tray(self) -> None:
+        if tray_mod is None:
+            return
+        try:
+            self._tray = tray_mod.TrayIcon(
+                self,
+                icon_path=self._tray_icon_path(),
+                tooltip=f"LG600 Studio {APP_VERSION}",
+                on_show=self._show_window,
+                on_toggle=self._on_toggle_stream,
+                on_rotate=self._on_next_project,
+                on_quit=self.on_close,
+            )
+            if not self._tray.start():
+                self._tray = None
+                _warn_once("托盘图标创建失败，已隐藏到普通窗口模式")
+                return
+        except Exception as exc:  # 托盘失败不影响主窗口
+            _warn_once(f"托盘初始化失败：{exc}")
+            self._tray = None
+            return
+        self.after(60, self._tray_poll)
+
+    def _tray_poll(self) -> None:
+        if self._closing or self._tray is None:
+            return
+        try:
+            self._tray.poll()
+        except Exception as exc:
+            _warn_once(f"托盘消息处理失败：{exc}")
+        self.after(60, self._tray_poll)
+
+    def _update_tray_tooltip(self, text: str) -> None:
+        if self._tray is None:
+            return
+        try:
+            self._tray.set_tooltip(text)
+        except Exception:  # 提示文案失败无关紧要
+            pass
+
+    def _show_window(self) -> None:
+        try:
+            self.deiconify()
+            self.lift()
+            self.focus_force()
+        except tk.TclError:
+            pass
+
+    def _hide_to_tray(self) -> None:
+        if self._tray is None:
+            self._set_status("托盘不可用，无法隐藏窗口", "warn")
+            return
+        try:
+            self.withdraw()
+        except tk.TclError:
+            pass
+
+    # ---- 全局热键 ------------------------------------------------------ #
+    def _init_hotkeys(self) -> None:
+        if hotkeys_mod is None:
+            return
+        try:
+            manager = hotkeys_mod.HotkeyManager(self)
+        except Exception as exc:
+            _warn_once(f"热键初始化失败：{exc}")
+            return
+        bindings = (
+            (HOTKEY_TOGGLE_STREAM, self._on_toggle_stream, "开始/停止推流"),
+            (HOTKEY_NEXT_PROJECT, self._on_next_project, "下一个轮播工程"),
+            (HOTKEY_SHOW_WINDOW, self._show_window, "显示窗口"),
+        )
+        for spec, callback, label in bindings:
+            try:
+                if manager.register(spec, callback):
+                    self._hotkey_ok.append(f"{spec}（{label}）")
+            except Exception as exc:
+                _warn_once(f"注册热键 {spec} 失败：{exc}")
+        if not self._hotkey_ok:
+            return
+        self._hotkeys = manager
+        self.after(80, self._hotkeys_poll)
+        if self._header_hint is not None:
+            hint = " · ".join(self._hotkey_ok)
+            self._header_hint.configure(text=f"v{APP_VERSION} · 热键：{hint}")
+
+    def _hotkeys_poll(self) -> None:
+        if self._closing or self._hotkeys is None:
+            return
+        try:
+            self._hotkeys.poll()
+        except Exception as exc:
+            _warn_once(f"热键消息处理失败：{exc}")
+        self.after(80, self._hotkeys_poll)
+
+    # ---- 工程轮播 ------------------------------------------------------ #
+    def _load_playlist(self) -> None:
+        if playlist_mod is None:
+            return
+        interval = PLAYLIST_DEFAULT_INTERVAL
+        if settings_mod is not None:
+            saved = settings_mod.get("playlist_interval")
+            if isinstance(saved, (int, float)) and 3 <= float(saved) <= 3600:
+                interval = float(saved)
+        try:
+            playlist = playlist_mod.Playlist.load(playlist_mod.LIST_PATH())
+            playlist.interval = interval
+        except Exception as exc:  # 列表文件坏了就从空列表开始
+            _warn_once(f"读取轮播列表失败：{exc}")
+            playlist = playlist_mod.Playlist([], interval)
+        self._playlist = playlist
+
+    def _save_playlist(self) -> None:
+        if self._playlist is None or playlist_mod is None:
+            return
+        try:
+            self._playlist.save(playlist_mod.LIST_PATH())
+        except Exception as exc:
+            _warn_once(f"保存轮播列表失败：{exc}")
+
+    def _playlist_interval(self) -> float:
+        if self._playlist is None:
+            return PLAYLIST_DEFAULT_INTERVAL
+        try:
+            return max(3.0, float(self._playlist.interval))
+        except (AttributeError, TypeError, ValueError):
+            return PLAYLIST_DEFAULT_INTERVAL
+
+    def _on_add_to_playlist(self) -> None:
+        if self._playlist is None:
+            self._set_status("轮播模块不可用", "error")
+            return
+        if not self.project_path:
+            self._on_save_project_as()
+        if not self.project_path:
+            self._set_status("先把当前工程保存成 .lg6.json 才能加入轮播", "warn")
+            return
+        try:
+            self._playlist.add(self.project_path)
+        except Exception as exc:
+            self._set_status(f"加入轮播失败：{exc}", "error")
+            return
+        self._save_playlist()
+        self._set_status(
+            f"已加入轮播（共 {len(self._playlist.items)} 个工程，每 "
+            f"{self._playlist_interval():.0f} 秒切换）",
+            "info",
+        )
+
+    def _on_clear_playlist(self) -> None:
+        if self._playlist is None:
+            return
+        self._playlist.clear()
+        self._save_playlist()
+        if self._playlist_active:
+            self._on_toggle_playlist()
+        self._set_status("已清空轮播列表", "info")
+
+    def _on_toggle_playlist(self) -> None:
+        if self._playlist is None:
+            self._set_status("轮播模块不可用", "error")
+            return
+        if self._playlist_active:
+            self._playlist_active = False
+            if self._playlist_job is not None:
+                try:
+                    self.after_cancel(self._playlist_job)
+                except Exception:  # 任务可能已执行完
+                    pass
+                self._playlist_job = None
+            self._set_status("已停止工程轮播", "info")
+            return
+        if not self._playlist.items:
+            self._set_status("轮播列表为空：先用「加入轮播」把工程加进来", "warn")
+            return
+        self._playlist_active = True
+        interval = self._playlist_interval()
+        self._set_status(f"工程轮播已启动：每 {interval:.0f} 秒切换一个工程", "info")
+        self._playlist_job = self.after(int(interval * 1000), self._playlist_tick)
+
+    def _playlist_tick(self) -> None:
+        self._playlist_job = None
+        if not self._playlist_active or self._playlist is None:
+            return
+        path = self._playlist.advance()
+        if path is not None:
+            self.load_project(str(path), notify=False)
+            self._set_status(f"轮播切换到：{os.path.basename(str(path))}", "info")
+        self._playlist_job = self.after(int(self._playlist_interval() * 1000), self._playlist_tick)
+
+    def _on_next_project(self) -> None:
+        if self._playlist is None or not self._playlist.items:
+            self._set_status("轮播列表为空：先用「加入轮播」把工程加进来", "warn")
+            return
+        path = self._playlist.advance()
+        if path is not None:
+            self.load_project(str(path), notify=False)
+            self._set_status(f"切换到：{os.path.basename(str(path))}", "info")
+
+    def _on_playlist_interval(self) -> None:
+        if self._playlist is None:
+            return
+        try:
+            value = simpledialog.askfloat(
+                "轮播间隔",
+                "每个工程显示多少秒？",
+                initialvalue=self._playlist_interval(),
+                minvalue=3,
+                maxvalue=3600,
+                parent=self,
+            )
+        except tk.TclError:
+            value = None
+        if not value:
+            return
+        self._playlist.interval = float(value)
+        self._save_playlist()
+        if settings_mod is not None:
+            try:
+                settings_mod.set("playlist_interval", float(value))
+            except Exception as exc:
+                _warn_once(f"保存轮播间隔失败：{exc}")
+        self._set_status(f"轮播间隔改为 {float(value):.0f} 秒", "info")
+        if self._playlist_active:
+            self._on_toggle_playlist()
+            self._on_toggle_playlist()
+
+    # ---- 拖放导入（WM_DROPFILES） ------------------------------------- #
+    def _install_drop_target(self) -> None:
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+            result = ctypes.c_ssize_t
+            wndproc = ctypes.WINFUNCTYPE(
+                result, ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p
+            )
+            hwnd = int(self.winfo_id())
+            root_hwnd = user32.GetAncestor(hwnd, 2) or hwnd  # GA_ROOT
+            self._drop_hwnd = int(root_hwnd)
+            user32.CallWindowProcW.restype = result
+            user32.CallWindowProcW.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_uint,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+            ]
+            shell32.DragQueryFileW.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_uint,
+                ctypes.c_wchar_p,
+                ctypes.c_uint,
+            ]
+            shell32.DragQueryFileW.restype = ctypes.c_uint
+            shell32.DragFinish.argtypes = [ctypes.c_void_p]
+
+            setter = getattr(user32, "SetWindowLongPtrW", None) or user32.SetWindowLongW
+            setter.restype = ctypes.c_void_p
+            setter.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+            getter = getattr(user32, "GetWindowLongPtrW", None) or user32.GetWindowLongW
+            getter.restype = ctypes.c_void_p
+            getter.argtypes = [ctypes.c_void_p, ctypes.c_int]
+
+            old_proc = getter(self._drop_hwnd, -4)  # GWLP_WNDPROC
+
+            def handler(hwnd_: Any, msg: int, wparam: Any, lparam: Any) -> Any:
+                if msg == 0x0233:  # WM_DROPFILES
+                    try:
+                        drop = ctypes.c_void_p(wparam)
+                        count = shell32.DragQueryFileW(drop, 0xFFFFFFFF, None, 0)
+                        paths: list[str] = []
+                        for index in range(int(count)):
+                            length = shell32.DragQueryFileW(drop, index, None, 0)
+                            buffer = ctypes.create_unicode_buffer(int(length) + 1)
+                            shell32.DragQueryFileW(drop, index, buffer, int(length) + 1)
+                            paths.append(buffer.value)
+                        shell32.DragFinish(drop)
+                        self.after(0, lambda items=paths: self._on_files_dropped(items))
+                    except Exception as exc:  # 拖放解析失败不影响主流程
+                        self.after(
+                            0,
+                            lambda message=str(exc): self._set_status(
+                                f"拖放失败：{message}", "error"
+                            ),
+                        )
+                    return 0
+                return user32.CallWindowProcW(old_proc, hwnd_, msg, wparam, lparam)
+
+            self._drop_proc = wndproc(handler)
+            setter(self._drop_hwnd, -4, ctypes.cast(self._drop_proc, ctypes.c_void_p))
+            shell32.DragAcceptFiles(self._drop_hwnd, True)
+        except Exception as exc:  # 拖放是锦上添花，失败不影响其他功能
+            self._drop_proc = None
+            _warn_once(f"拖放导入不可用：{exc}")
+
+    def _on_files_dropped(self, paths: list[str]) -> None:
+        if not paths:
+            return
+        project_exts = (".lg6.json", ".json")
+        image_exts = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
+        gif_exts = (".gif",)
+        video_exts = (".mp4", ".avi", ".webm", ".mov", ".mkv")
+        for path in paths:
+            lower = path.lower()
+            if lower.endswith(project_exts):
+                if self.load_project(path):
+                    self._set_status(f"已打开工程：{os.path.basename(path)}", "info")
+                continue
+            if lower.endswith(gif_exts):
+                self._set_background(type="gif", path=path, fit="crop")
+            elif lower.endswith(video_exts):
+                self._set_background(type="video", path=path, fit="crop")
+            elif lower.endswith(image_exts):
+                self._set_background(type="image", path=path, fit="crop")
+            else:
+                self._set_status(f"不支持的文件类型：{os.path.basename(path)}", "warn")
+                continue
+            self._set_status(f"背景已换成：{os.path.basename(path)}", "info")
+
+    # ---- 开机自启 / 官方软件 ------------------------------------------ #
+    def _refresh_autostart_var(self) -> None:
+        if autostart_mod is None or getattr(self, "_autostart_var", None) is None:
+            return
+        try:
+            self._autostart_var.set(bool(autostart_mod.is_enabled()))
+        except Exception as exc:
+            _warn_once(f"读取开机自启状态失败：{exc}")
+
+    def _on_toggle_autostart(self) -> None:
+        if autostart_mod is None or getattr(self, "_autostart_var", None) is None:
+            return
+        desired = bool(self._autostart_var.get())
+        try:
+            if desired:
+                project = self.project_path if isinstance(self.project_path, str) else None
+                command = autostart_mod.build_command(autostream=True, project=project)
+                autostart_mod.enable(command)
+                self._set_status(f"已启用开机自启：{command}", "info")
+            else:
+                autostart_mod.disable()
+                self._set_status("已关闭开机自启", "info")
+        except Exception as exc:
+            self._autostart_var.set(not desired)
+            self._set_status(f"设置开机自启失败：{exc}", "error")
+
+    def _on_kill_vendor(self) -> None:
+        if device_mod is None:
+            return
+        killer = getattr(device_mod, "kill_vendor_software", None)
+        if not callable(killer):
+            self._set_status("当前设备模块不支持结束官方软件（请更新 device.py）", "warn")
+            return
+        try:
+            terminated = killer(timeout=3.0)
+        except Exception as exc:
+            self._set_status(f"结束官方软件失败：{exc}", "error")
+            return
+        if terminated:
+            names = "、".join(sorted(set(terminated)))
+            self._set_status(f"已结束官方软件：{names}（屏幕现在归本程序）", "info")
+            if self._device_hint is not None:
+                self._device_hint.configure(text="")
+        else:
+            self._set_status("没有发现官方 TCOMAS 软件在运行", "info")
+        self._detect_device(auto=True)
+
+    def _on_toggle_stream(self) -> None:
+        """托盘/热键共用：正在推流就停，否则尝试开始。"""
+        if self._is_streaming():
+            self._on_stop_stream()
+        else:
+            self._on_start_stream()
+
+    def _open_log_folder(self) -> None:
+        if diagnostics_mod is None:
+            return
+        try:
+            folder = os.path.dirname(str(diagnostics_mod.log_path()))
+        except Exception as exc:
+            self._set_status(f"找不到日志目录：{exc}", "warn")
+            return
+        try:
+            os.startfile(folder)  # noqa: S606 - 打开资源管理器给用户看日志是预期行为
+        except Exception as exc:
+            self._set_status(f"打开日志目录失败：{exc}（路径：{folder}）", "warn")
 
 
 def _parse_control_reply(reply: bytes) -> tuple[str, int | None]:
@@ -3068,6 +3650,11 @@ def main(argv: list[str] | None = None) -> int:
     """启动 GUI；返回进程退出码（冒烟模式恒为 0）。"""
     args = parse_args(argv)
     smoke = args.smoke_shot
+    if diagnostics_mod is not None:
+        try:
+            diagnostics_mod.install()
+        except Exception as exc:  # 日志装不上只影响排查
+            print(f"[lg6studio] 崩溃日志初始化失败：{exc}", file=sys.stderr)
     try:
         app = App(smoke_shot=smoke)
     except Exception:

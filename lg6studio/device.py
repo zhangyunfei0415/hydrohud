@@ -11,7 +11,12 @@ to the 441-byte one. Both speak the same framing:
     byte 4      flags                0x80 on the first packet of a transfer
     bytes 5..   payload
 
-A frame is 15 packets of 1020 bytes, so the encoded JPEG must be <= 15300 bytes.
+A frame is a run of 1020-byte chunks; the vendor firmware pads every frame to its
+own packet count and keeps only 15 of them, but the panel renders up to 46 packets
+(46920 bytes) correctly, which is the ceiling used here. Packets beyond the JPEG's
+end-of-image marker are zero bytes on the wire and cost no decode time, so the
+larger budget buys picture quality, not latency. The frame must always be 480x480:
+a 640x640 JPEG stalls the USB endpoint and the panel drops off the bus.
 The panel has a watchdog: it blanks a few seconds after the stream stops, so a
 still image has to be retransmitted continuously (see `Screen.keepalive`).
 
@@ -39,10 +44,10 @@ SCREEN_W = 480
 SCREEN_H = 480
 
 CHUNK_SIZE = 1020
-FRAME_CHUNKS = 15
-MAX_FRAME_BYTES = CHUNK_SIZE * FRAME_CHUNKS  # 15300: the firmware mishandles more
-MAX_CHUNKS = 255
-ABSOLUTE_MAX_FRAME_BYTES = CHUNK_SIZE * MAX_CHUNKS
+MAX_CHUNKS = 46  # 46920 bytes per frame: the most the panel has been verified to render
+MAX_FRAME_BYTES = CHUNK_SIZE * MAX_CHUNKS
+HARD_MAX_CHUNKS = 255  # the chunk-count field is one byte, so 255 is the protocol ceiling
+ABSOLUTE_MAX_FRAME_BYTES = CHUNK_SIZE * HARD_MAX_CHUNKS
 
 CMD_STREAM = 0x08
 FLAG_FIRST = 0x80
@@ -180,6 +185,12 @@ kernel32.WriteFile.restype = ctypes.c_int
 
 TH32CS_SNAPPROCESS = 0x00000002
 VENDOR_PROCESS_NAMES = ("devicedriver.exe", "tcomas.exe", "xyui.exe")
+SYNCHRONIZE = 0x00100000
+PROCESS_TERMINATE = 0x0001
+kernel32.OpenProcess.restype = ctypes.c_void_p
+kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+kernel32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+kernel32.TerminateProcess.restype = ctypes.c_int
 
 
 class PROCESSENTRY32W(ctypes.Structure):
@@ -343,6 +354,52 @@ def enumerate_devices(vid: int = VENDOR_ID, pid: int = PRODUCT_ID) -> list[dict]
     ]
 
 
+def vendor_processes() -> list[tuple[int, str]]:
+    """Return ``(pid, exe_name)`` for every running official TCOMAS process."""
+    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snapshot == INVALID_HANDLE_VALUE or snapshot is None:
+        return []
+    found: list[tuple[int, str]] = []
+    try:
+        entry = PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(entry)
+        if not kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
+            return []
+        while True:
+            if entry.szExeFile.lower() in VENDOR_PROCESS_NAMES:
+                found.append((entry.th32ProcessID, entry.szExeFile))
+            if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                return found
+    finally:
+        kernel32.CloseHandle(snapshot)
+
+
+def kill_vendor_software(timeout: float = 3.0) -> list[str]:
+    """Terminate the official TCOMAS processes and wait until they are gone.
+
+    Returns the exe names that were terminated (empty when nothing was running).
+    The caller needs this before streaming because both programs write to the
+    same panel, and the vendor software keeps re-pushing its own picture.
+    """
+    processes = vendor_processes()
+    if not processes:
+        return []
+    terminated: list[str] = []
+    for pid, name in processes:
+        handle = kernel32.OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, False, pid)
+        if not handle:
+            continue
+        try:
+            kernel32.TerminateProcess(handle, 1)
+            terminated.append(name)
+        finally:
+            kernel32.CloseHandle(handle)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and vendor_processes():
+        time.sleep(0.1)
+    return terminated
+
+
 def vendor_software_running() -> bool:
     """Whether the official TCOMAS software currently owns the panel.
 
@@ -350,21 +407,7 @@ def vendor_software_running() -> bool:
     still open the device and stream into the same interface - the two streams
     then fight over the panel. Callers use this to warn the user instead.
     """
-    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
-    if snapshot == INVALID_HANDLE_VALUE or snapshot is None:
-        return False
-    try:
-        entry = PROCESSENTRY32W()
-        entry.dwSize = ctypes.sizeof(entry)
-        if not kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
-            return False
-        while True:
-            if entry.szExeFile.lower() in VENDOR_PROCESS_NAMES:
-                return True
-            if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
-                return False
-    finally:
-        kernel32.CloseHandle(snapshot)
+    return bool(vendor_processes())
 
 
 def find_image_interface(vid: int = VENDOR_ID, pid: int = PRODUCT_ID) -> HidInfo:
@@ -423,14 +466,16 @@ def rotate_image(img: Image.Image, degrees: int) -> Image.Image:
 def encode_jpeg(img: Image.Image, max_bytes: int = MAX_FRAME_BYTES, rotate: int = 0) -> bytes:
     """Encode a frame to JPEG, lowering quality until it fits `max_bytes`.
 
-    The quality ladder reaches well below anything used for a normal picture,
-    because the panel only takes 15300 bytes per frame and a pathological input
-    (per-pixel noise) would otherwise fail outright.
+    Quality starts at 100 so a photo can use the panel's full 46920-byte frame
+    budget; the ladder still reaches far below anything sensible because a
+    pathological input (per-pixel noise) ramps up to ~230 KB at quality 100.
 
     Raises `ValueError` when even the lowest quality overflows.
     """
     img = rotate_image(img.convert("RGB"), rotate)
     ladder = (
+        100,
+        98,
         95,
         92,
         88,
@@ -477,8 +522,8 @@ def build_packets(cmd: int, payload: bytes, chunk_size: int, report_len: int) ->
     byte carrying `0x80` on the first packet of the transfer.
     """
     chunk_count = max(1, -(-len(payload) // chunk_size))
-    if chunk_count > MAX_CHUNKS:
-        raise ValueError(f"payload is {len(payload)} bytes, at most {MAX_CHUNKS} chunks fit")
+    if chunk_count > HARD_MAX_CHUNKS:
+        raise ValueError(f"payload is {len(payload)} bytes, at most {HARD_MAX_CHUNKS} chunks fit")
     padded = payload + b"\x00" * (chunk_count * chunk_size - len(payload))
     reports: list[bytes] = []
     for index in range(chunk_count):
@@ -505,17 +550,22 @@ def build_reports(
 
 
 def frame_reports(jpeg: bytes) -> list[bytes]:
-    """Validate a frame and return its HID reports, always exactly 15 packets.
+    """Validate a frame and return its HID reports, padded to a whole packet count.
 
-    The vendor software always sends a full 15-packet frame, padding the JPEG
-    with zero bytes, so short pictures are padded here as well: a frame with
-    fewer packets is not known to be accepted by the firmware.
+    The panel buffers a full packet boundary and only decodes up to the JPEG's
+    end-of-image marker, so a short picture is padded with zero bytes to the
+    next 1020-byte boundary instead of being rejected.
     """
     if not jpeg:
         raise ValueError("empty frame")
-    if len(jpeg) > MAX_FRAME_BYTES:
-        raise ValueError(f"frame is {len(jpeg)} bytes, the panel accepts at most {MAX_FRAME_BYTES}")
-    return build_reports(jpeg + b"\x00" * (MAX_FRAME_BYTES - len(jpeg)))
+    chunk_count = max(1, -(-len(jpeg) // CHUNK_SIZE))
+    if chunk_count > MAX_CHUNKS:
+        raise ValueError(
+            f"frame is {len(jpeg)} bytes ({chunk_count} packets), "
+            f"the panel is verified up to {MAX_FRAME_BYTES} bytes ({MAX_CHUNKS} packets)"
+        )
+    padding = chunk_count * CHUNK_SIZE - len(jpeg)
+    return build_packets(CMD_STREAM, jpeg + b"\x00" * padding, CHUNK_SIZE, REPORT_LEN)
 
 
 # --------------------------------------------------------------------------- #
@@ -569,6 +619,17 @@ class _HidDevice:
         if self._handle:
             kernel32.CloseHandle(self._handle)
             self._handle = None
+
+    def reopen(self) -> _HidDevice:
+        """Drop the cached handle and path, then re-enumerate and open.
+
+        The device path changes whenever Windows re-enumerates the panel (USB
+        reset, sleep/wake, a firmware stall), so the cached `HidInfo` must not
+        be reused across a reconnect.
+        """
+        self.close()
+        self.info = None
+        return self.open()
 
     def __enter__(self) -> _HidDevice:
         return self.open()

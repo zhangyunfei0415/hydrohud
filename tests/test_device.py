@@ -23,7 +23,8 @@ def _noise_image(size: int = 480) -> Image.Image:
 def test_report_lengths_match_panel_contract() -> None:
     assert device.REPORT_LEN == 1025
     assert device.CONTROL_REPORT_LEN == 441
-    assert device.MAX_FRAME_BYTES == 15300
+    assert device.MAX_FRAME_BYTES == 46920
+    assert device.MAX_FRAME_BYTES == device.CHUNK_SIZE * device.MAX_CHUNKS
 
 
 def test_build_packets_marks_first_packet_and_numbers_the_rest() -> None:
@@ -58,12 +59,20 @@ def test_control_command_parameter_lands_at_offset_five() -> None:
     assert packets[0][5] == 42
 
 
-def test_a_frame_is_exactly_fifteen_packets() -> None:
+def test_a_frame_is_padded_to_a_whole_packet_count() -> None:
     jpeg = device.encode_jpeg(Image.new("RGB", (480, 480), (10, 20, 30)))
     packets = device.frame_reports(jpeg)
-    assert len(packets) == device.FRAME_CHUNKS == 15
+    expected = max(1, -(-len(jpeg) // device.CHUNK_SIZE))
+    assert len(packets) == expected
     assert all(len(packet) == device.REPORT_LEN for packet in packets)
-    assert packets[0][2] == 15
+    # First packet carries the chunk count, the rest 1-based indices.
+    assert packets[0][2] == expected
+    assert [packet[2] for packet in packets[1:]] == list(range(1, expected))
+    # The payload is zero padded up to the last packet boundary.
+    padding = expected * device.CHUNK_SIZE - len(jpeg)
+    assert padding < device.CHUNK_SIZE
+    if padding:
+        assert packets[-1][-padding:] == b"\x00" * padding
 
 
 def test_frame_over_the_panel_limit_is_rejected() -> None:
@@ -74,8 +83,11 @@ def test_frame_over_the_panel_limit_is_rejected() -> None:
 
 
 def test_encode_jpeg_stays_under_the_frame_limit() -> None:
-    assert len(device.encode_jpeg(Image.new("RGB", (480, 480), (200, 30, 30)))) <= 15300
-    assert len(device.encode_jpeg(_noise_image(480))) <= 15300
+    assert (
+        len(device.encode_jpeg(Image.new("RGB", (480, 480), (200, 30, 30))))
+        <= device.MAX_FRAME_BYTES
+    )
+    assert len(device.encode_jpeg(_noise_image(480))) <= device.MAX_FRAME_BYTES
 
 
 def test_encode_jpeg_rotation_keeps_the_panel_size() -> None:
