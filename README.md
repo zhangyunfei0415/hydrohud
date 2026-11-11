@@ -21,7 +21,7 @@
 | TCOMAS LG700 | `1A2C:151C` | 另一套 USB 实现 | ⬜ 未验证，欢迎贡献 |
 | 你的屏幕？ | — | — | 👉 见下方「给 agent 的提示词」 |
 
-协议笔记：[docs/PROTOCOL.md](docs/PROTOCOL.md)（报文格式、控制命令、逆向过程、踩过的坑）。同生态的另外两条路子：命令行版 [lg600.py](../lg600/lg600.py) 与 [liquidctl 驱动适配](../lg600/notes/liquidctl-adapter.md)。
+协议笔记：[docs/PROTOCOL.md](docs/PROTOCOL.md)（报文格式、控制命令、逆向过程、踩过的坑）。同一块屏还有另外两条路子：单文件命令行版 `lg600.py` 与 [liquidctl](https://github.com/liquidctl/liquidctl) 驱动适配（后者可和别的 AIO 设备统一管理）。
 
 ## 给 agent 的提示词（让别人也能适配自己的屏幕）
 
@@ -121,10 +121,10 @@ python -m hydrohud --autostream --project "D:\我的场景.hud.json"
 
 ## 命令行 / 自动化
 
-GUI 之外还有两条路子：
+GUI 之外还有两条路子（都不在本仓库内，属于同一块屏的其他实现）：
 
-- `lg600.py`（纯标准库 + Pillow，单文件）：`python lg600.py push photo.jpg --hold 0` 常驻显示一张图。
-- `liquidctl` 驱动：`liquidctl set lcd screen static photo.png --keepalive 0`，可和别的 AIO 设备统一管理。
+- 单文件命令行版 `lg600.py`（纯标准库 + Pillow）：`python lg600.py push photo.jpg --hold 0` 常驻显示一张图。
+- [liquidctl](https://github.com/liquidctl/liquidctl) 驱动：`liquidctl set lcd screen static photo.png --keepalive 0`，可和别的 AIO 设备统一管理。
 
 ## 系统状态（v1.2）
 
