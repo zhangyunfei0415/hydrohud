@@ -164,6 +164,9 @@ def _reset_media(monkeypatch):
     FakeManager.requests = 0
     FakeManager.fail_request = None
     FakeReader.instances.clear()
+    # 本文件是纯软件测试：SDK 由替身注入，平台判断也必须固定成 Windows，
+    # 否则在 Linux CI 上 available() 恒为 False，所有读取路径都被短路。
+    monkeypatch.setattr(media.sys, "platform", "win32")
     monkeypatch.setattr(media, "_sdk_loader", lambda: FakeSdk())
     media._reset_sdk()
     yield

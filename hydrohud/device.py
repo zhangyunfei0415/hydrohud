@@ -29,11 +29,13 @@ from __future__ import annotations
 import ctypes
 import io
 import struct
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from PIL import Image
 
@@ -91,9 +93,50 @@ FILE_SHARE_WRITE = 0x00000002
 OPEN_EXISTING = 3
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
-kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-hid = ctypes.WinDLL("hid", use_last_error=True)
-setupapi = ctypes.WinDLL("setupapi", use_last_error=True)
+_IS_WINDOWS = sys.platform == "win32"
+
+
+class _UnavailableSymbol:
+    """Stand-in for a Win32 entry point on non-Windows platforms."""
+
+    def __init__(self, dll: str, symbol: str) -> None:
+        self.dll = dll
+        self.symbol = symbol
+        self.argtypes: Any = None
+        self.restype: Any = None
+
+    def __call__(self, *args: object, **kwargs: object) -> None:
+        raise OSError(f"{self.dll}!{self.symbol} is only available on Windows")
+
+
+class _UnavailableDll:
+    """Stand-in for a Windows DLL: attribute access yields a callable that raises."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __getattr__(self, symbol: str) -> _UnavailableSymbol:
+        stub = _UnavailableSymbol(self.name, symbol)
+        setattr(self, symbol, stub)
+        return stub
+
+
+def _load_dll(name: str) -> Any:
+    """Load a Win32 DLL, or return a placeholder so imports work elsewhere."""
+    if not _IS_WINDOWS:
+        return _UnavailableDll(name)
+    return ctypes.WinDLL(name, use_last_error=True)
+
+
+def _last_error() -> int:
+    """``GetLastError`` on Windows; zero elsewhere where it does not exist."""
+    getter = getattr(ctypes, "get_last_error", None)
+    return int(getter()) if getter is not None else 0
+
+
+kernel32 = _load_dll("kernel32")
+hid = _load_dll("hid")
+setupapi = _load_dll("setupapi")
 
 
 class GUID(ctypes.Structure):
@@ -263,7 +306,7 @@ def enumerate_hid(vid: int | None = None, pid: int | None = None) -> list[HidInf
         ctypes.byref(guid), None, None, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE
     )
     if devinfo == INVALID_HANDLE_VALUE or not devinfo:
-        raise OSError(f"SetupDiGetClassDevsW failed, error {ctypes.get_last_error()}")
+        raise OSError(f"SetupDiGetClassDevsW failed, error {_last_error()}")
 
     found: list[HidInfo] = []
     try:
@@ -410,6 +453,8 @@ def describe_panel() -> str:
 
 def vendor_processes() -> list[tuple[int, str]]:
     """Return ``(pid, exe_name)`` for every running official TCOMAS process."""
+    if not _IS_WINDOWS:
+        return []
     snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
     if snapshot == INVALID_HANDLE_VALUE or snapshot is None:
         return []
@@ -668,7 +713,7 @@ class _HidDevice:
             None,
         )
         if handle == INVALID_HANDLE_VALUE or handle is None:
-            error = ctypes.get_last_error()
+            error = _last_error()
             raise RuntimeError(
                 f"cannot open {self.info.path} (error {error}); "
                 "close the vendor TCOMAS software and retry"
@@ -710,7 +755,7 @@ class _HidDevice:
         buf = ctypes.create_string_buffer(report, len(report))
         written = ctypes.c_uint32(0)
         if not kernel32.WriteFile(self._handle, buf, len(report), ctypes.byref(written), None):
-            raise OSError(f"WriteFile failed, error {ctypes.get_last_error()}")
+            raise OSError(f"WriteFile failed, error {_last_error()}")
 
     def read_report(self, timeout: float = 1.0) -> bytes | None:
         """Read one input report, returning `None` if nothing arrives in `timeout`."""

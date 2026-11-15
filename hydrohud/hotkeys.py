@@ -24,7 +24,7 @@ try:  # 非 Windows 平台仍允许 import，只是不可用
 
     user32: Any = ctypes.WinDLL("user32", use_last_error=True)
     _WIN32 = True
-except (AttributeError, OSError):  # pragma: no cover - 非 Windows 平台
+except (AttributeError, OSError, ImportError):  # pragma: no cover - 非 Windows 平台
     wintypes = None  # type: ignore[assignment]
     user32 = None
     _WIN32 = False
