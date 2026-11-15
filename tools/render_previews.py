@@ -198,6 +198,145 @@ def _contact_sheet(tiles: list[tuple[str, Image.Image]], path: str) -> None:
     sheet.save(path)
 
 
+def _render_v13_gallery(photo: str) -> list[tuple[str, Image.Image]]:
+    """渲染 v1.3 新增能力的演示图：7 类新图层、屏幕捕获背景、插件图层。"""
+    plugin = _render_plugin_scene()
+    scenes = [
+        (
+            "16-v13-showcase",
+            "16 v1.3 新图层",
+            {
+                "background": {"type": "image", "path": photo, "fit": "crop"},
+                "tint": {"color": "#08111F", "alpha": 0.55},
+                "layers": [
+                    {"type": "clock", "x": 0.5, "y": 0.1, "size": 72, "color": "#FFFFFF"},
+                    {
+                        "type": "thermometer",
+                        "x": 0.07,
+                        "y": 0.58,
+                        "metric": "cpu_temp",
+                        "w": 0.12,
+                        "label": True,
+                    },
+                    {
+                        "type": "countdown",
+                        "x": 0.5,
+                        "y": 0.34,
+                        "target": "2027-01-01 00:00:00",
+                        "title": "距离 2027 年",
+                        "size": 34,
+                        "title_size": 18,
+                    },
+                    {
+                        "type": "qrcode",
+                        "x": 0.87,
+                        "y": 0.22,
+                        "size": 0.2,
+                        "data": "https://github.com/zhangyunfei0415/hydrohud",
+                    },
+                    {
+                        "type": "weather",
+                        "x": 0.5,
+                        "y": 0.55,
+                        "fields": ["temp", "desc"],
+                        "place": "北京",
+                        "size": 26,
+                    },
+                    {
+                        "type": "nowplaying",
+                        "x": 0.5,
+                        "y": 0.7,
+                        "fields": ["title", "artist"],
+                        "placeholder": "未在播放",
+                        "size": 22,
+                    },
+                    {
+                        "type": "ticker",
+                        "x": 0.5,
+                        "y": 0.9,
+                        "text": "HydroHUD v1.3 · 14 类图层 · 插件 · 本地 API · 主题包 · ",
+                        "size": 26,
+                        "speed": 60.0,
+                        "band": True,
+                        "band_color": "#0B1220",
+                    },
+                ],
+            },
+        ),
+        (
+            "17-v13-capture-bg",
+            "17 屏幕捕获背景",
+            {
+                "background": {
+                    "type": "capture",
+                    "region": [0.0, 0.0, 1.0, 1.0],
+                    "fps": 5.0,
+                    "color": "#101828",
+                },
+                "tint": {"color": "#06101F", "alpha": 0.45},
+                "layers": [
+                    {
+                        "type": "text",
+                        "text": "屏幕捕获背景",
+                        "x": 0.5,
+                        "y": 0.5,
+                        "size": 48,
+                        "color": "#FFFFFF",
+                        "anchor": "mm",
+                    }
+                ],
+            },
+        ),
+    ]
+    tiles: list[tuple[str, Image.Image]] = []
+    for slug, label, scene in scenes:
+        path = os.path.join(PREVIEW_DIR, f"{slug}.png")
+        image = _render_to(path, scene, 1.2)
+        tiles.append((label, image))
+        print(f"[preview] {path}")
+    if plugin is not None:
+        slug, label, scene, plugin_image = plugin
+        path = os.path.join(PREVIEW_DIR, f"{slug}.png")
+        plugin_image.save(path)
+        tiles.append((label, plugin_image))
+        print(f"[preview] {path}")
+    return tiles
+
+
+def _render_plugin_scene() -> tuple[str, str, dict, Image.Image] | None:
+    """有示例插件时渲染一张插件图层演示图；没装插件就跳过。"""
+    try:
+        from hydrohud import plugins as plugins_mod
+    except Exception:
+        return None
+    try:
+        plugins_mod.discover()
+        spec = plugins_mod.registry().get("sparkline")
+    except Exception:
+        return None
+    if spec is None:
+        print("[preview] 跳过插件图层演示：未在插件目录找到 sparkline")
+        return None
+    layer = dict(spec.defaults)
+    layer["type"] = "sparkline"
+    scene = {
+        "background": {"type": "solid", "color": "#0B1220"},
+        "layers": [
+            layer,
+            {
+                "type": "text",
+                "text": "插件图层 · sparkline",
+                "x": 0.5,
+                "y": 0.88,
+                "size": 24,
+                "color": "#94A3B8",
+                "anchor": "mm",
+            },
+        ],
+    }
+    return ("18-v13-plugin-layer", "18 插件图层", scene, render_scene(scene, 1.2))
+
+
 def main() -> int:
     _ensure_dirs()
     photo = os.path.join(ASSETS_DIR, "demo_photo.png")
@@ -301,6 +440,9 @@ def main() -> int:
         print(f"[preview] {path}")
     else:
         print("[preview] 跳过视频背景：未安装 numpy/imageio")
+
+    gallery = _render_v13_gallery(photo)
+    tiles.extend(gallery)
 
     sheet_path = os.path.join(PREVIEW_DIR, "contact-sheet.png")
     _contact_sheet(tiles, sheet_path)

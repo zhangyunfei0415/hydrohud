@@ -13,8 +13,11 @@
   时钟取当前本地时间，系统监控 / 折线图 / 仪表取 :mod:`hydrohud.sensors` 的
   :class:`~hydrohud.sensors.SensorHub`（模块缺失时整层降级为 "—" / 0）。
 * 图层类型：``text`` / ``clock`` / ``sysinfo`` / ``bars`` / ``chart`` / ``gauge``
-  / ``image``；含 ``{metric}`` 占位符的 text 图层按动态图层处理，每帧替换占位符
-  后仍按最终字符串走图层缓存，不会重复真重绘。
+  / ``image``，以及 v1.3 的 ``thermometer`` / ``countdown`` / ``ticker`` /
+  ``sequence`` / ``qrcode`` / ``weather`` / ``nowplaying``；含 ``{metric}`` 占位符的
+  text 图层按动态图层处理，每帧替换占位符后仍按最终字符串走图层缓存，不会重复真重绘。
+* v1.3 的数据源（二维码 / 天气 / 媒体 / 屏幕捕获 / 插件）全部懒导入：模块缺失时
+  图层画占位内容、capture 背景退回纯色、未知图层静默跳过，绝不抛异常。
 * 解码结果（图片、GIF 全部帧、视频帧、字体）都进 LRU 缓存，
   ``clear_cache()`` 可清空（字体缓存保留，释放后重新加载代价很小）。
 * 静态内容会合并成一张底图缓存，帧间只重绘时钟/监控/进度条等动态图层，
@@ -67,7 +70,21 @@ __all__ = ["SCREEN_W", "SCREEN_H", "render_scene", "clear_cache", "load_font"]
 SCREEN_W = 480
 SCREEN_H = 480
 
-_DYNAMIC_TYPES = frozenset(("clock", "sysinfo", "bars", "chart", "gauge"))
+_DYNAMIC_TYPES = frozenset(
+    (
+        "clock",
+        "sysinfo",
+        "bars",
+        "chart",
+        "gauge",
+        "thermometer",
+        "countdown",
+        "ticker",
+        "sequence",
+        "weather",
+        "nowplaying",
+    )
+)
 _VALID_FITS = frozenset(("crop", "fit", "stretch"))
 
 _SHADOW_OFFSET = 3
@@ -259,8 +276,20 @@ _video_frames: OrderedDict = OrderedDict()
 _layer_cache: OrderedDict = OrderedDict()
 _layer_image_cache: OrderedDict = OrderedDict()
 _placeholder_cache = OrderedDict()
+#: v1.3 新图层的缓存：二维码矩阵 / 已放大位图 / 序列帧 / 封面 / 正在播放文本 / 捕获帧
+_qr_matrix_cache: OrderedDict = OrderedDict()
+_qr_image_cache: OrderedDict = OrderedDict()
+_sequence_cache: OrderedDict = OrderedDict()
+_cover_cache: OrderedDict = OrderedDict()
+_nowplaying_text_cache: OrderedDict = OrderedDict()
+_capture_cache: OrderedDict = OrderedDict()
 
 _LAYER_CACHE_LIMIT = 24
+_QR_CACHE_LIMIT = 8
+_SEQUENCE_CACHE_LIMIT = 12
+_COVER_CACHE_LIMIT = 8
+_NOWPLAYING_TEXT_LIMIT = 16
+_CAPTURE_CACHE_LIMIT = 4
 # 解码缓存按"已缩放到 480×480 的图像"保存，单帧约 0.69 MB，容量按内存预算取值：
 # 视频帧缓存 48 帧 ≈ 33 MB；GIF 最多 2 个、每个最多 120 帧 ≈ 165 MB 上限。
 _VIDEO_FRAME_LIMIT = 48
@@ -282,6 +311,45 @@ except Exception:  # noqa: BLE001 - 任何导入失败都视为没有传感器�
 #: （import 时绝不调用 ``get_hub()``，测试可把它替换成假 hub）。
 _sensor_hub: Any = None
 _hub_lock = threading.Lock()
+
+# ------------------------------------------------------------------ v1.3 可选数据源
+# 二维码 / 天气 / 媒体 / 屏幕捕获 / 插件模块都由其他模块维护，可能尚未安装或依赖
+# 不可用；懒导入后一切失败都降级成占位内容，绝不让 import 期抛异常。
+try:  # 纯 Python 二维码编码器
+    from . import qrmini as _qrmini
+except Exception:  # noqa: BLE001 - 任何导入失败都视为没有二维码模块
+    _qrmini = None
+
+try:  # 天气数据源（后台线程由 weather.get_hub() 自己管理）
+    from . import weather as _weather
+except Exception:  # noqa: BLE001
+    _weather = None
+
+try:  # 媒体数据源（Windows SMTC / 播放器状态）
+    from . import media as _media
+except Exception:  # noqa: BLE001
+    _media = None
+
+try:  # 屏幕捕获
+    from . import capture as _capture
+except Exception:  # noqa: BLE001
+    _capture = None
+
+try:  # 图层插件注册表
+    from . import plugins as _plugins
+except Exception:  # noqa: BLE001
+    _plugins = None
+
+#: 测试注入点：非 ``None`` 时优先于模块的 ``get_hub()``（与 ``_sensor_hub`` 同一约定）。
+_weather_hub: Any = None
+_media_hub: Any = None
+
+#: ``(lat, lon) -> WeatherHub`` 的有界缓存，避免每帧重复调 ``weather.get_hub()``。
+_weather_hubs: OrderedDict = OrderedDict()
+_WEATHER_HUB_LIMIT = 4
+
+#: ``media.get_hub()`` 是进程级单例，但要在锁内懒创建。
+_media_lock = threading.Lock()
 
 #: sensors 缺失时的指标元数据兜底，字段与 ``sensors.METRIC_SPECS`` 保持一致。
 _FALLBACK_METRIC_SPECS: dict[str, dict] = {
@@ -440,7 +508,47 @@ def _background_image(background: dict, t: float) -> Image.Image:
         except Exception as exc:  # 解码失败 → 占位提示，避免整个界面崩
             return _placeholder_image("视频解码失败", str(exc)).copy()
         return frame.copy()
+    if kind == "capture":
+        return _capture_frame(background, t)
     return _solid_image("#0B0F14").copy()
+
+
+def _capture_frame(background: dict, t: float) -> Image.Image:
+    """屏幕捕获背景：按 ``fps`` 节流截图；capture 模块缺失时退回纯色底。
+
+    节流键是 ``int(t * fps)``，所以同一时间槽内连续渲染复用同一张图，
+    不会因为预览以 60 fps 刷新就把截屏频率也拉到 60。
+    """
+    if _capture is None:
+        return _solid_image("#0B0F14").copy()
+    region = background.get("region")
+    if not isinstance(region, (list, tuple)) or len(region) != 4:
+        region = (0.0, 0.0, 1.0, 1.0)
+    else:
+        region = tuple(_clamped(value, 0.0, 1.0, 0.0) for value in region)
+    monitor = int(round(_clamped(background.get("monitor", 0), 0, 8, 0)))
+    fps = _clamped(background.get("fps", 5.0), 0.5, 30.0, 5.0)
+    key = (
+        int(t * fps),
+        tuple(round(float(value), 6) for value in region),
+        monitor,
+        SCREEN_W,
+    )
+    cached = _lru_touch(_capture_cache, key)
+    if cached is not None:
+        return cached.copy()
+    try:
+        grabber = getattr(_capture, "grab", None) or getattr(_capture, "grab_cached", None)
+        image = grabber(region, monitor, SCREEN_W)
+    except Exception:  # noqa: BLE001 - 截图失败绝不能让整帧渲染失败
+        return _solid_image("#0B0F14").copy()
+    if not isinstance(image, Image.Image):
+        return _solid_image("#0B0F14").copy()
+    if image.size != (SCREEN_W, SCREEN_H):
+        image = _fit_to_screen(image.convert("RGB"), "crop")
+    result = image.convert("RGB")
+    _lru_put(_capture_cache, key, result, _CAPTURE_CACHE_LIMIT)
+    return result.copy()
 
 
 def _gif_frames(path: str, fit: str) -> tuple[list[Image.Image], list[int]]:
@@ -875,12 +983,38 @@ def _text_needs_refresh(layer: dict) -> bool:
     return isinstance(text, str) and _PLACEHOLDER_RE.search(text) is not None
 
 
+def _qr_needs_refresh(layer: dict) -> bool:
+    """qrcode 图层是否含 ``{占位符}``（是则逐帧重算，否则可当静态图层缓存）。"""
+    if str(layer.get("type") or "").strip().lower() != "qrcode":
+        return False
+    data = layer.get("data")
+    return isinstance(data, str) and _PLACEHOLDER_RE.search(data) is not None
+
+
 def _is_dynamic_layer(layer: dict) -> bool:
-    """图层是否需要逐帧重绘（类型动态或 text 带占位符）。"""
+    """图层是否需要逐帧重绘（类型动态、text 带占位符、qrcode 带占位符或插件图层）。"""
     kind = str(layer.get("type") or "").strip().lower()
     if kind in _DYNAMIC_TYPES:
         return True
-    return kind == "text" and _text_needs_refresh(layer)
+    if kind == "text" and _text_needs_refresh(layer):
+        return True
+    if _qr_needs_refresh(layer):
+        return True
+    return _is_plugin_layer(kind)
+
+
+def _is_plugin_layer(kind: str) -> bool:
+    """``kind`` 是否是已注册的插件图层类型（``plugins`` 缺失时为 ``False``）。"""
+    module = _plugins
+    if module is None or not kind:
+        return False
+    checker = getattr(module, "is_registered", None)
+    if not callable(checker):
+        return False
+    try:
+        return bool(checker(kind))
+    except Exception:  # noqa: BLE001 - 注册表异常按非插件处理
+        return False
 
 
 def _resolve_template(text: str, ctx: dict) -> str:
@@ -1297,6 +1431,1051 @@ def _draw_missing_image(draw: ImageDraw.ImageDraw, layer: dict) -> None:
     draw.text((center_x, center_y), "图片缺失", font=font, fill=(252, 165, 165), anchor="mm")
 
 
+# ------------------------------------------------------------------ v1.3 新图层公共工具
+_CLAMPED_FONT_SIZES = (9, 400)
+_O_COUNTDOWN_PLACEHOLDER = "设置目标时间"
+_QR_PLACEHOLDER_TEXT = "二维码"
+_SEQUENCE_PLACEHOLDER_TEXT = "图片序列缺失"
+_TICKER_CYCLE_MIN = 8.0
+_WEATHER_PLACEHOLDER_TEXT = "天气 —"
+_WEATHER_ICON_KINDS = ("sun", "cloud", "rain", "snow", "fog", "storm")
+
+
+def _clamped(value: Any, low: float, high: float, default: float) -> float:
+    """把任意值夹到 ``[low, high]``；非法值用 ``default``。"""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if not math.isfinite(number):
+        return float(default)
+    return max(float(low), min(float(high), number))
+
+
+def _layer_font_size(layer: dict, name: str, default: float, minimum: float = 9.0) -> int:
+    """读取图层字号字段（``size`` / ``value_size`` / ``title_size`` …），夹到 9~400。"""
+    return int(round(_clamped(layer.get(name, default), minimum, 400, default)))
+
+
+def _text_width(font: ImageFont.ImageFont, text: str) -> float:
+    """量文本宽度（优先 ``font.getlength``，失败时退回临时画布 ``textbbox``）。"""
+    if not text:
+        return 0.0
+    getter = getattr(font, "getlength", None)
+    if callable(getter):
+        try:
+            return max(0.0, float(getter(text)))
+        except Exception:  # noqa: BLE001 - 字体实现异常时退回 textbbox
+            pass
+    scratch = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    bbox = scratch.textbbox((0, 0), text, font=font, anchor="lt")
+    return max(0.0, float(bbox[2] - bbox[0]))
+
+
+def _anchor_factors(anchor: Any) -> tuple[float, float]:
+    """anchor → ``(水平因子, 垂直因子)``：left/top=0、center=0.5、right/bottom=1。"""
+    vertical, horizontal = _anchor_parts(anchor if isinstance(anchor, str) else "center")
+    factors_x = {"left": 0.0, "center": 0.5, "right": 1.0}
+    factors_y = {"top": 0.0, "center": 0.5, "bottom": 1.0}
+    return factors_x[horizontal], factors_y[vertical]
+
+
+def _layer_placeholder(
+    draw: ImageDraw.ImageDraw,
+    layer: dict,
+    label: str,
+    box: tuple[float, float, float, float] | None = None,
+) -> None:
+    """画图层占位框（缺模块 / 缺数据时统一降级外观）。"""
+    if box is None:
+        center_x = float(layer.get("x", 0.5)) * SCREEN_W
+        center_y = float(layer.get("y", 0.5)) * SCREEN_H
+        box = (center_x - 85.0, center_y - 45.0, center_x + 85.0, center_y + 45.0)
+    draw.rounded_rectangle(box, radius=12, outline=(100, 116, 139), width=2, fill=(17, 24, 39))
+    draw.text(
+        ((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0),
+        label,
+        font=load_font(18),
+        fill=(148, 163, 184),
+        anchor="mm",
+    )
+
+
+# ------------------------------------------------------------------ 温度计图层
+def _thermometer_box(layer: dict) -> tuple[float, float, float, float]:
+    """温度计外接框 ``(left, top, width, height)``；``x, y`` 按左上角解释（与 bars 一致）。"""
+    width = max(
+        6.0, min(float(SCREEN_W), _clamped(layer.get("w", 0.14), 0.0, 2.0, 0.14) * SCREEN_W)
+    )
+    height = max(
+        6.0, min(float(SCREEN_H), _clamped(layer.get("h", 0.62), 0.0, 2.0, 0.62) * SCREEN_H)
+    )
+    left = max(0.0, min(float(SCREEN_W) - width, float(layer.get("x", 0.5)) * SCREEN_W))
+    top = max(0.0, min(float(SCREEN_H) - height, float(layer.get("y", 0.5)) * SCREEN_H))
+    return left, top, width, height
+
+
+def _draw_thermometer_layer(
+    draw: ImageDraw.ImageDraw, layer: dict, ctx: dict, t: float = 0.0
+) -> None:
+    """竖向胶囊温度计：填充比例按 ``[min, max]`` 换算，数值/标签在胶囊上方或下方。"""
+    metric = str(layer.get("metric") or "cpu")
+    left, top, width, height = _thermometer_box(layer)
+    right, bottom = left + width, top + height
+    value = _metric_value(metric, ctx)
+    low = _layer_bound(layer, "min")
+    if low is None:
+        low = 0.0
+    high = _layer_bound(layer, "max")
+    if high is None:
+        high = _metric_max(metric)
+    if high <= low:
+        high = low + 1.0
+    ratio = 0.0 if value is None else max(0.0, min(1.0, (value - low) / (high - low)))
+    radius = _clamped(layer.get("radius", 0.5), 0.0, 1.0, 0.5) * width / 2.0
+    track = _rgb(layer.get("track", "#1E293B"))
+    color = _rgb(layer.get("color", "#FB7185"))
+    draw.rounded_rectangle((left, top, right, bottom), radius=radius, fill=track)
+    fill_height = ratio * height
+    if fill_height > 0.5:
+        draw.rounded_rectangle(
+            (left, bottom - fill_height, right, bottom),
+            radius=min(radius, fill_height / 2.0),
+            fill=color,
+        )
+    if layer.get("label", True):
+        label_font = load_font(_layer_font_size(layer, "size", 20))
+        draw.text(
+            (left + width / 2.0, max(2.0, top - 4.0)),
+            _metric_label(metric),
+            font=label_font,
+            fill=(226, 232, 240),
+            anchor="mb",
+        )
+    if layer.get("show_value", True):
+        value_font = load_font(_layer_font_size(layer, "value_size", 34), bold=True)
+        text = _gauge_numeric_text(metric, value, layer.get("show_unit", True))
+        if width >= 56.0 and height >= 150.0:
+            draw.text(
+                (left + width / 2.0, bottom - 6.0),
+                text,
+                font=value_font,
+                fill=(255, 255, 255),
+                anchor="mb",
+            )
+        else:
+            draw.text(
+                (left + width / 2.0, bottom + 4.0),
+                text,
+                font=value_font,
+                fill=color,
+                anchor="mt",
+            )
+
+
+# ------------------------------------------------------------------ 倒计时图层
+def _parse_target(value: Any) -> _dt.datetime | None:
+    """解析 ``target``：支持 ``YYYY-MM-DD``、完整 ISO 8601 与时区后缀；失败返回 ``None``。"""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = _dt.datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone().replace(tzinfo=None)
+    return parsed
+
+
+def _countdown_parts(layer: dict, now: _dt.datetime | None = None) -> tuple[str, str, str]:
+    """返回 ``(标题, 主文本, 状态)``；状态为 ``running`` / ``done`` / ``placeholder``。
+
+    ``format`` 支持 ``{d}`` 天、``{h}`` / ``{m}`` / ``{s}``（时/分/秒，两位补零）。
+    """
+    moment = now or _dt.datetime.now()
+    title = str(layer.get("title") or "").strip()
+    target = _parse_target(layer.get("target"))
+    if target is None:
+        return title, _O_COUNTDOWN_PLACEHOLDER, "placeholder"
+    remaining = (target - moment).total_seconds()
+    if remaining <= 0.0:
+        return title, str(layer.get("done_text") or "时间到"), "done"
+    total = int(math.floor(remaining))
+    days, remainder = divmod(total, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    template = str(layer.get("format") or "{d} 天 {h}:{m}:{s}")
+    main = (
+        template.replace("{d}", str(days))
+        .replace("{h}", f"{hours:02d}")
+        .replace("{m}", f"{minutes:02d}")
+        .replace("{s}", f"{seconds:02d}")
+    )
+    return title, main, "running"
+
+
+def _draw_countdown_layer(
+    draw: ImageDraw.ImageDraw, layer: dict, ctx: dict | None = None, t: float = 0.0
+) -> None:
+    """倒计时：小号标题 + 大号剩余时间；target 为空/非法时画弱化的「设置目标时间」。"""
+    title, main, state = _countdown_parts(layer)
+    main_font = load_font(_layer_font_size(layer, "size", 44), bold=True)
+    title_font = load_font(_layer_font_size(layer, "title_size", 22))
+    weak = _rgb(layer.get("title_color", "#94A3B8"))
+    strong = _rgb(layer.get("color", "#38BDF8"))
+    lines: list[tuple[str, ImageFont.ImageFont, tuple[int, int, int]]] = []
+    if title:
+        lines.append((title, title_font, weak))
+    lines.append((main, main_font, strong if state == "running" else weak))
+    _paint_text_block(
+        draw,
+        lines,
+        float(layer.get("x", 0.5)) * SCREEN_W,
+        float(layer.get("y", 0.5)) * SCREEN_H,
+        layer.get("anchor", "center"),
+        align="center",
+        shadow=bool(layer.get("shadow", True)),
+    )
+
+
+# ------------------------------------------------------------------ 滚动文字图层
+def _ticker_metrics(layer: dict, t: float) -> tuple[float, float, float]:
+    """返回 ``(相位, 文本宽度, 循环周期)``；相位只由 ``t`` 决定，图层本身无状态。"""
+    text = str(layer.get("text") or "")
+    font = load_font(_layer_font_size(layer, "size", 34), bool(layer.get("bold", False)))
+    text_width = max(1.0, _text_width(font, text))
+    gap = _clamped(layer.get("gap", 0.5), 0.0, 4.0, 0.5) * SCREEN_W
+    cycle = max(_TICKER_CYCLE_MIN, text_width + gap)
+    speed = max(5.0, min(600.0, _clamped(layer.get("speed", 60.0), 5.0, 600.0, 60.0)))
+    phase = (max(0.0, float(t)) * speed) % cycle
+    return phase, text_width, cycle
+
+
+def _draw_ticker_layer(
+    draw: ImageDraw.ImageDraw, layer: dict, t: float, ctx: dict | None = None
+) -> None:
+    """整屏跑马灯：按 ``gap`` 比例重复文本，相位 ``(t * speed) % 周期`` 决定偏移。"""
+    text = str(layer.get("text") or "")
+    if not text:
+        return
+    font = load_font(_layer_font_size(layer, "size", 34), bool(layer.get("bold", False)))
+    color = _rgb(layer.get("color", "#E2E8F0"))
+    phase, text_width, cycle = _ticker_metrics(layer, t)
+    ascent, descent = font.getmetrics()
+    line_height = ascent + descent
+    center_y = float(layer.get("y", 0.5)) * SCREEN_H
+    if layer.get("band", False):
+        band_height = min(float(SCREEN_H), line_height + 16.0)
+        band_top = center_y - band_height / 2.0
+        draw.rectangle(
+            (0.0, band_top, float(SCREEN_W), band_top + band_height),
+            fill=_rgb(layer.get("band_color", "#0B0F14")),
+        )
+        text_top = band_top + 8.0
+    else:
+        text_top = center_y - line_height / 2.0
+    forward = str(layer.get("direction", "left")) != "right"
+    base = -phase if forward else phase - cycle
+    copies = int(math.ceil((SCREEN_W + text_width) / cycle)) + 2
+    shadow = bool(layer.get("shadow", True))
+    for step in range(-2, copies + 2):
+        x = base + step * cycle
+        if x > SCREEN_W or x + text_width < 0:
+            continue
+        if shadow:
+            draw.text(
+                (x + _SHADOW_OFFSET, text_top + _SHADOW_OFFSET),
+                text,
+                font=font,
+                fill=_SHADOW_COLOR,
+                anchor="lt",
+            )
+        draw.text((x, text_top), text, font=font, fill=color, anchor="lt")
+
+
+# ------------------------------------------------------------------ 图片序列图层
+def _sequence_paths(layer: dict) -> list[str]:
+    """规范化 ``paths``：只保留非空字符串路径，最多 64 个（与 scenes 的限制一致）。"""
+    raw = layer.get("paths")
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [str(item).strip() for item in raw if isinstance(item, str) and str(item).strip()][:64]
+
+
+def _sequence_frame_path(layer: dict, t: float) -> tuple[str, int]:
+    """按 ``int(t * fps)`` 选帧；``loop=False`` 时截断到末帧。"""
+    paths = _sequence_paths(layer)
+    if not paths:
+        return "", 0
+    fps = _clamped(layer.get("fps", 8.0), 0.5, 60.0, 8.0)
+    index = int(math.floor(max(0.0, float(t)) * fps))
+    if bool(layer.get("loop", True)):
+        index %= len(paths)
+    else:
+        index = min(index, len(paths) - 1)
+    return paths[index], index
+
+
+def _fit_to_box(source: Image.Image, width: int, height: int, fit: str) -> Image.Image:
+    """把图片塞进 ``width×height`` 盒子并返回 RGBA（``fit`` 语义与背景一致）。"""
+    width = max(1, int(width))
+    height = max(1, int(height))
+    if fit not in _VALID_FITS:
+        fit = "crop"
+    src_w, src_h = source.size
+    if src_w <= 0 or src_h <= 0:
+        return Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    if fit == "stretch":
+        return source.resize((width, height), Image.Resampling.LANCZOS).convert("RGBA")
+    if fit == "crop":
+        scale = max(width / src_w, height / src_h)
+        target_w = max(1, int(round(src_w * scale)))
+        target_h = max(1, int(round(src_h * scale)))
+        scaled = source.resize((target_w, target_h), Image.Resampling.LANCZOS)
+        left = max(0, (target_w - width) // 2)
+        top = max(0, (target_h - height) // 2)
+        return scaled.crop((left, top, left + width, top + height)).convert("RGBA")
+    scale = min(width / src_w, height / src_h)
+    target_w = max(1, int(round(src_w * scale)))
+    target_h = max(1, int(round(src_h * scale)))
+    scaled = source.resize((target_w, target_h), Image.Resampling.LANCZOS).convert("RGBA")
+    canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    canvas.paste(scaled, ((width - target_w) // 2, (height - target_h) // 2))
+    return canvas
+
+
+def _sequence_image(layer: dict, path: str, width: int, height: int) -> Image.Image:
+    """取（并缓存）序列帧：键为 绝对路径 + mtime/大小 + 盒子尺寸 + fit/圆角/透明度。"""
+    fit = str(layer.get("fit", "crop"))
+    radius = _clamped(layer.get("radius", 0.0), 0.0, 1.0, 0.0)
+    opacity = _clamped(layer.get("opacity", 1.0), 0.0, 1.0, 1.0)
+    key = (
+        os.path.abspath(path),
+        _file_sig(path),
+        width,
+        height,
+        fit,
+        round(radius, 3),
+        round(opacity, 3),
+    )
+    cached = _lru_touch(_sequence_cache, key)
+    if cached is not None:
+        return cached
+    source = _source_image(path)
+    image = _fit_to_box(source, width, height, fit)
+    if radius > 0.0:
+        mask = Image.new("L", (width, height), 0)
+        ImageDraw.Draw(mask).rounded_rectangle(
+            (0, 0, width - 1, height - 1),
+            radius=int(round(min(width, height) * radius / 2.0)),
+            fill=255,
+        )
+        image.putalpha(mask)
+    if opacity < 1.0:
+        alpha = image.getchannel("A")
+        alpha = ImageChops.multiply(alpha, Image.new("L", alpha.size, int(round(opacity * 255))))
+        image.putalpha(alpha)
+    _lru_put(_sequence_cache, key, image, _SEQUENCE_CACHE_LIMIT)
+    return image
+
+
+def _draw_sequence_layer(
+    canvas: Image.Image, draw: ImageDraw.ImageDraw, layer: dict, t: float
+) -> None:
+    """图片序列：按 fps 取帧，按 ``w×h`` 盒子 fit 后按 anchor 贴到 ``x, y``。"""
+    path, _index = _sequence_frame_path(layer, t)
+    width = max(1, int(round(_clamped(layer.get("w", 0.5), 0.0, 2.0, 0.5) * SCREEN_W)))
+    height = max(1, int(round(_clamped(layer.get("h", 0.5), 0.0, 2.0, 0.5) * SCREEN_H)))
+    if not path:
+        _layer_placeholder(draw, layer, _SEQUENCE_PLACEHOLDER_TEXT)
+        return
+    try:
+        image = _sequence_image(layer, path, width, height)
+    except (FileNotFoundError, OSError, ValueError):
+        _layer_placeholder(draw, layer, _SEQUENCE_PLACEHOLDER_TEXT)
+        return
+    factor_x, factor_y = _anchor_factors(layer.get("anchor", "center"))
+    left = int(round(float(layer.get("x", 0.5)) * SCREEN_W - width * factor_x))
+    top = int(round(float(layer.get("y", 0.5)) * SCREEN_H - height * factor_y))
+    canvas.paste(image, (left, top), image)
+
+
+# ------------------------------------------------------------------ 二维码图层
+def _qr_data(layer: dict, ctx: dict | None) -> str:
+    """二维码最终编码文本：先替换 ``{metric}`` 等模板占位符（无 ctx 时原样保留）。"""
+    raw = str(layer.get("data") or "")
+    if not raw:
+        return ""
+    if ctx is not None and _PLACEHOLDER_RE.search(raw):
+        return _resolve_template(raw, ctx)
+    return raw
+
+
+def _qr_error_level(layer: dict) -> str:
+    """纠错级别：只接受 L/M/Q/H，未知值退回 M。"""
+    value = str(layer.get("error", "M")).strip().upper()
+    return value if value in ("L", "M", "Q", "H") else "M"
+
+
+def _qr_matrix(layer: dict, data: str) -> tuple[tuple[bool, ...], ...] | None:
+    """调用 ``qrmini.make`` 并缓存矩阵（键 ``data + error``，容量有界）。"""
+    if not data or _qrmini is None:
+        return None
+    error = _qr_error_level(layer)
+    key = (data, error)
+    cached = _lru_touch(_qr_matrix_cache, key)
+    if cached is not None:
+        return cached
+    maker = getattr(_qrmini, "make", None)
+    if not callable(maker):
+        return None
+    try:
+        matrix = maker(data, error)
+    except Exception:  # noqa: BLE001 - 编码失败（数据过长等）按"没有二维码"降级
+        return None
+    if not isinstance(matrix, (list, tuple)) or not matrix:
+        return None
+    rows: list[tuple[bool, ...]] = []
+    for row in matrix:
+        if not isinstance(row, (list, tuple)) or not row:
+            return None
+        rows.append(tuple(bool(cell) for cell in row))
+    if not rows or len({len(row) for row in rows}) != 1:
+        return None
+    result = tuple(rows)
+    _lru_put(_qr_matrix_cache, key, result, _QR_CACHE_LIMIT)
+    return result
+
+
+def _qr_geometry(layer: dict, count: int) -> tuple[int, int, int]:
+    """返回 ``(module, actual, border)``：``module = floor(span / (n + 2*border))``。"""
+    span = max(
+        8.0, min(float(SCREEN_W), _clamped(layer.get("size", 0.5), 0.0, 2.0, 0.5) * SCREEN_W)
+    )
+    border = int(round(_clamped(layer.get("border", 2), 0.0, 8.0, 2.0)))
+    total_modules = count + 2 * border
+    module = int(math.floor(span / total_modules)) if total_modules > 0 else 0
+    return module, module * total_modules, border
+
+
+def _qr_image(
+    layer: dict, matrix: tuple[tuple[bool, ...], ...], module: int, border: int
+) -> Image.Image:
+    """按矩阵渲染二维码位图（最近邻放大，键含 矩阵/边框/前景/背景/模块尺寸）。"""
+    count = len(matrix)
+    total = count + 2 * border
+    fg = _rgb(layer.get("fg", "#0B0F14"))
+    bg = _rgb(layer.get("bg", "#FFFFFF"))
+    key = (matrix, border, fg, bg, module)
+    cached = _lru_touch(_qr_image_cache, key)
+    if cached is not None:
+        return cached
+    pixels = bytes(255 if cell else 0 for row in matrix for cell in row)
+    mask_small = Image.frombytes("L", (count, count), pixels)
+    mask = Image.new("L", (total, total), 0)
+    mask.paste(mask_small, (border, border))
+    if module > 1:
+        mask = mask.resize((module * total, module * total), Image.Resampling.NEAREST)
+    image = Image.new("RGB", mask.size, bg)
+    image.paste(fg, (0, 0), mask)
+    _lru_put(_qr_image_cache, key, image, _QR_CACHE_LIMIT)
+    return image
+
+
+def _draw_qr_placeholder(
+    draw: ImageDraw.ImageDraw, center_x: float, center_y: float, span: float
+) -> None:
+    """module < 1 / 缺 qrmini / 数据为空时的二维码占位框。"""
+    half = max(20.0, span / 2.0)
+    _layer_placeholder(
+        draw,
+        {"x": center_x / SCREEN_W, "y": center_y / SCREEN_H},
+        _QR_PLACEHOLDER_TEXT,
+        box=(center_x - half, center_y - half, center_x + half, center_y + half),
+    )
+
+
+def _draw_qrcode_layer(
+    canvas: Image.Image, draw: ImageDraw.ImageDraw, layer: dict, ctx: dict | None = None
+) -> None:
+    """二维码：``module < 1`` 或编码失败时画占位框；``label=True`` 时下方补一行可读文本。"""
+    data = _qr_data(layer, ctx)
+    span = max(
+        8.0, min(float(SCREEN_W), _clamped(layer.get("size", 0.5), 0.0, 2.0, 0.5) * SCREEN_W)
+    )
+    center_x = float(layer.get("x", 0.5)) * SCREEN_W
+    center_y = float(layer.get("y", 0.5)) * SCREEN_H
+    matrix = _qr_matrix(layer, data)
+    if matrix is None:
+        _draw_qr_placeholder(draw, center_x, center_y, span)
+        return
+    module, actual, border = _qr_geometry(layer, len(matrix))
+    if module < 1:
+        _draw_qr_placeholder(draw, center_x, center_y, span)
+        return
+    image = _qr_image(layer, matrix, module, border)
+    factor_x, factor_y = _anchor_factors(layer.get("anchor", "center"))
+    left = int(round(center_x - actual * factor_x))
+    top = int(round(center_y - actual * factor_y))
+    canvas.paste(image, (left, top))
+    if layer.get("label", False) and data:
+        label_font = load_font(_layer_font_size(layer, "label_size", 18))
+        label_text = data if len(data) <= 30 else data[:28] + "…"
+        draw.text(
+            (center_x, top + actual + 6.0),
+            label_text,
+            font=label_font,
+            fill=_rgb(layer.get("label_color", "#FFFFFF")),
+            anchor="mt",
+        )
+
+
+# ------------------------------------------------------------------ 天气图层
+def _wmo_icon_kind(code: float | None) -> str:
+    """WMO 天气代码 → 内置矢量图标类别（晴/云/雨/雪/雾/雷）。"""
+    if code is None:
+        return "cloud"
+    value = int(code)
+    if value <= 1:
+        return "sun"
+    if value <= 3:
+        return "cloud"
+    if value in (45, 48):
+        return "fog"
+    if 51 <= value <= 67 or 80 <= value <= 82:
+        return "rain"
+    if 71 <= value <= 77 or 85 <= value <= 86:
+        return "snow"
+    if 95 <= value <= 99:
+        return "storm"
+    return "cloud"
+
+
+def _wmo_description(code: float | None) -> str:
+    """WMO 代码 → 中文描述；优先用 weather 模块的 ``WEATHER_CODE_TEXT``。"""
+    if code is None:
+        return ""
+    table = getattr(_weather, "WEATHER_CODE_TEXT", None) if _weather is not None else None
+    if isinstance(table, dict):
+        text = table.get(int(code))
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    return {
+        "sun": "晴",
+        "cloud": "多云",
+        "rain": "雨",
+        "snow": "雪",
+        "fog": "雾",
+        "storm": "雷暴",
+    }[_wmo_icon_kind(code)]
+
+
+def _weather_icon_kind(snapshot: dict) -> str:
+    """优先用 weather 模块的 ``code_icon``，否则按 WMO 代码走内置映射。"""
+    code = _finite_or_none(snapshot.get("code"))
+    getter = getattr(_weather, "code_icon", None) if _weather is not None else None
+    if code is not None and callable(getter):
+        try:
+            kind = str(getter(int(code))).strip().lower()
+            if kind in _WEATHER_ICON_KINDS:
+                return kind
+        except Exception:  # noqa: BLE001 - 第三方映射失败时用内置表
+            pass
+    return _wmo_icon_kind(code)
+
+
+def _weather_hub_for(lat: float | None, lon: float | None) -> Any:
+    """测试注入的 ``_weather_hub`` 优先；否则懒创建并缓存 ``weather.get_hub(lat, lon)``。"""
+    hub = _weather_hub
+    if hub is not None:
+        return hub
+    if _weather is None:
+        return None
+    getter = getattr(_weather, "get_hub", None)
+    if not callable(getter):
+        return None
+    key = (
+        None if lat is None else round(float(lat), 4),
+        None if lon is None else round(float(lon), 4),
+    )
+    cached = _lru_touch(_weather_hubs, key)
+    if cached is not None:
+        return cached
+    try:
+        hub = getter() if lat is None and lon is None else getter(lat, lon)
+    except Exception:  # noqa: BLE001 - 天气后端初始化失败视为无数据
+        return None
+    if hub is None:
+        return None
+    _lru_put(_weather_hubs, key, hub, _WEATHER_HUB_LIMIT)
+    return hub
+
+
+def _weather_snapshot(ctx: dict, layer: dict) -> dict:
+    """取天气快照：同一次渲染内按 ``(lat, lon)`` 缓存，任何异常都返回 ``{}``。"""
+    lat = _finite_or_none(layer.get("lat"))
+    lon = _finite_or_none(layer.get("lon"))
+    store = ctx.get("weather")
+    if not isinstance(store, dict):
+        store = {}
+        ctx["weather"] = store
+    key = (
+        None if lat is None else round(lat, 4),
+        None if lon is None else round(lon, 4),
+    )
+    if key in store:
+        return store[key]
+    snapshot: dict = {}
+    hub = _weather_hub_for(lat, lon)
+    getter = getattr(hub, "snapshot", None) if hub is not None else None
+    if callable(getter):
+        try:
+            value = getter()
+        except Exception:  # noqa: BLE001 - 快照异常时按无数据绘制
+            value = None
+        if isinstance(value, dict):
+            snapshot = value
+    store[key] = snapshot
+    return snapshot
+
+
+def _weather_text(layer: dict, snapshot: dict) -> str:
+    """把快照里选中的字段拼成一行；无任何数据时返回「天气 —」。"""
+    fields = layer.get("fields") or ("temp", "desc")
+    separator = str(layer.get("separator") or "  ")
+    parts: list[str] = []
+    place = str(layer.get("place") or snapshot.get("place") or "").strip()
+    if place:
+        parts.append(place)
+    for field in fields:
+        name = str(field).strip().lower()
+        if name == "temp":
+            value = _finite_or_none(snapshot.get("temp"))
+            if value is not None:
+                parts.append(f"{value:.0f}°")
+        elif name == "feels":
+            value = _finite_or_none(snapshot.get("feels"))
+            if value is not None:
+                parts.append(f"体感 {value:.0f}°")
+        elif name == "humidity":
+            value = _finite_or_none(snapshot.get("humidity"))
+            if value is not None:
+                parts.append(f"湿度 {value:.0f}%")
+        elif name == "wind":
+            value = _finite_or_none(snapshot.get("wind"))
+            if value is not None:
+                parts.append(f"风 {value:.0f} km/h")
+        elif name == "desc":
+            text = str(snapshot.get("desc") or "").strip()
+            if not text:
+                text = _wmo_description(_finite_or_none(snapshot.get("code")))
+            if text:
+                parts.append(text)
+    if not parts:
+        return _WEATHER_PLACEHOLDER_TEXT
+    return separator.join(parts)
+
+
+_SUN_COLOR = (251, 191, 36)
+_CLOUD_COLOR = (203, 213, 225)
+_RAIN_COLOR = (96, 165, 250)
+_SNOW_COLOR = (241, 245, 249)
+_FOG_COLOR = (148, 163, 184)
+_STORM_COLOR = (250, 204, 21)
+
+
+def _draw_sun_icon(draw: ImageDraw.ImageDraw, cx: float, cy: float, radius: float) -> None:
+    """太阳：中心圆 + 8 条光芒。"""
+    core = radius * 0.42
+    draw.ellipse((cx - core, cy - core, cx + core, cy + core), fill=_SUN_COLOR)
+    for index in range(8):
+        angle = math.pi * index / 4.0
+        inner = core * 1.25
+        outer = radius * 0.95
+        draw.line(
+            [
+                (cx + math.cos(angle) * inner, cy + math.sin(angle) * inner),
+                (cx + math.cos(angle) * outer, cy + math.sin(angle) * outer),
+            ],
+            fill=_SUN_COLOR,
+            width=max(2, int(radius * 0.1)),
+        )
+
+
+def _draw_cloud_icon(
+    draw: ImageDraw.ImageDraw, cx: float, cy: float, radius: float, color: tuple[int, int, int]
+) -> None:
+    """云朵：三团椭圆 + 底部圆角横条（雨/雪/雷图标复用它作底座）。"""
+    base = cy + radius * 0.35
+    thickness = radius * 0.55
+    draw.ellipse(
+        (cx - radius * 0.85, base - thickness, cx - radius * 0.05, base + thickness * 0.45),
+        fill=color,
+    )
+    draw.ellipse(
+        (cx + radius * 0.05, base - thickness * 1.15, cx + radius * 0.85, base + thickness * 0.45),
+        fill=color,
+    )
+    draw.ellipse(
+        (cx - radius * 0.45, base - thickness * 1.5, cx + radius * 0.35, base - thickness * 0.2),
+        fill=color,
+    )
+    draw.rounded_rectangle(
+        (cx - radius * 0.85, base - thickness * 0.25, cx + radius * 0.85, base + thickness * 0.5),
+        radius=thickness * 0.4,
+        fill=color,
+    )
+
+
+def _draw_weather_icon(
+    draw: ImageDraw.ImageDraw, kind: str, center_x: float, center_y: float, size: float
+) -> None:
+    """用内置矢量图形画天气图标（不依赖任何图片资源或网络）。"""
+    radius = max(4.0, float(size) / 2.0)
+    if kind == "sun":
+        _draw_sun_icon(draw, center_x, center_y, radius)
+    elif kind == "rain":
+        _draw_cloud_icon(draw, center_x, center_y, radius, _CLOUD_COLOR)
+        for index in range(3):
+            x = center_x - radius * 0.55 + index * radius * 0.55
+            draw.line(
+                [
+                    (x, center_y + radius * 0.2),
+                    (x - radius * 0.16, center_y + radius * 0.72),
+                ],
+                fill=_RAIN_COLOR,
+                width=max(2, int(radius * 0.12)),
+            )
+    elif kind == "snow":
+        _draw_cloud_icon(draw, center_x, center_y, radius * 0.92, _CLOUD_COLOR)
+        for index in range(3):
+            x = center_x - radius * 0.5 + index * radius * 0.5
+            y = center_y + radius * 0.62
+            dot = max(2.0, radius * 0.1)
+            draw.ellipse((x - dot, y - dot, x + dot, y + dot), fill=_SNOW_COLOR)
+            draw.line([(x - dot * 1.5, y), (x + dot * 1.5, y)], fill=_SNOW_COLOR, width=2)
+    elif kind == "fog":
+        for index, width_scale in enumerate((0.9, 0.75, 0.85)):
+            y = center_y - radius * 0.3 + index * radius * 0.32
+            half = radius * width_scale
+            draw.line(
+                [(center_x - half, y), (center_x + half, y)],
+                fill=_FOG_COLOR,
+                width=max(3, int(radius * 0.2)),
+            )
+    elif kind == "storm":
+        _draw_cloud_icon(draw, center_x, center_y - radius * 0.1, radius * 0.9, _CLOUD_COLOR)
+        draw.polygon(
+            [
+                (center_x + radius * 0.1, center_y + radius * 0.05),
+                (center_x - radius * 0.3, center_y + radius * 0.7),
+                (center_x + radius * 0.0, center_y + radius * 0.62),
+                (center_x - radius * 0.2, center_y + radius * 1.05),
+                (center_x + radius * 0.35, center_y + radius * 0.35),
+                (center_x + radius * 0.05, center_y + radius * 0.42),
+            ],
+            fill=_STORM_COLOR,
+        )
+    else:
+        _draw_cloud_icon(draw, center_x, center_y, radius, _CLOUD_COLOR)
+
+
+def _draw_weather_layer(draw: ImageDraw.ImageDraw, layer: dict, ctx: dict, t: float = 0.0) -> None:
+    """天气图层：左侧内置矢量图标 + 右侧一行天气文本；无数据时只画「天气 —」。"""
+    snapshot = _weather_snapshot(ctx, layer)
+    text = _weather_text(layer, snapshot)
+    font = load_font(_layer_font_size(layer, "size", 28))
+    fill = _rgb(layer.get("color", "#E2E8F0"))
+    center_x = float(layer.get("x", 0.5)) * SCREEN_W
+    center_y = float(layer.get("y", 0.5)) * SCREEN_H
+    shadow = bool(layer.get("shadow", True))
+    if not layer.get("icon", True) or not snapshot:
+        _paint_text_block(
+            draw,
+            [(text, font, fill)],
+            center_x,
+            center_y,
+            layer.get("anchor", "center"),
+            align="center",
+            shadow=shadow,
+        )
+        return
+    icon_size = float(_layer_font_size(layer, "icon_size", 56, minimum=12.0))
+    gap = max(6.0, icon_size * 0.15)
+    text_width = _text_width(font, text)
+    total_width = icon_size + gap + text_width
+    factor_x, _factor_y = _anchor_factors(layer.get("anchor", "center"))
+    left = center_x - total_width * factor_x
+    _draw_weather_icon(
+        draw, _weather_icon_kind(snapshot), left + icon_size / 2.0, center_y, icon_size
+    )
+    text_x = left + icon_size + gap
+    if shadow:
+        draw.text(
+            (text_x + _SHADOW_OFFSET, center_y + _SHADOW_OFFSET),
+            text,
+            font=font,
+            fill=_SHADOW_COLOR,
+            anchor="lm",
+        )
+    draw.text((text_x, center_y), text, font=font, fill=fill, anchor="lm")
+
+
+# ------------------------------------------------------------------ 正在播放图层
+def _media_hub_or_none() -> Any:
+    """返回进程级 MediaHub；media 模块缺失或初始化失败时返回 ``None``。"""
+    global _media_hub
+    hub = _media_hub
+    if hub is not None:
+        return hub
+    if _media is None:
+        return None
+    getter = getattr(_media, "get_hub", None)
+    if not callable(getter):
+        return None
+    with _media_lock:
+        if _media_hub is None:
+            try:
+                _media_hub = getter()
+            except Exception:  # noqa: BLE001 - 媒体后端不可用按无数据绘制
+                return None
+        return _media_hub
+
+
+def _media_snapshot(ctx: dict) -> dict:
+    """媒体快照；同一次渲染内只取一次，任何异常都返回 ``{}``。"""
+    cached = ctx.get("media")
+    if isinstance(cached, dict):
+        return cached
+    snapshot: dict = {}
+    hub = _media_hub_or_none()
+    getter = getattr(hub, "snapshot", None) if hub is not None else None
+    if callable(getter):
+        try:
+            value = getter()
+        except Exception:  # noqa: BLE001 - 快照异常时按无数据绘制
+            value = None
+        if isinstance(value, dict):
+            snapshot = value
+    ctx["media"] = snapshot
+    return snapshot
+
+
+def _nowplaying_lines(layer: dict, snapshot: dict) -> list[tuple[str, str]]:
+    """按 ``fields`` 取文本行：``("title", 标题)`` 在前，``("meta", 作者/专辑)`` 在后。"""
+    fields = [str(item).strip().lower() for item in (layer.get("fields") or ("title", "artist"))]
+    title = str(snapshot.get("title") or "").strip()
+    artist = str(snapshot.get("artist") or "").strip()
+    album = str(snapshot.get("album") or "").strip()
+    separator = str(layer.get("separator") or " · ")
+    lines: list[tuple[str, str]] = []
+    if "title" in fields and title:
+        lines.append(("title", title))
+    meta_parts: list[str] = []
+    if "artist" in fields and artist:
+        meta_parts.append(artist)
+    if "album" in fields and album:
+        meta_parts.append(album)
+    if meta_parts:
+        lines.append(("meta", separator.join(meta_parts)))
+    return lines
+
+
+def _nowplaying_text_image(layer: dict, lines: list[tuple[str, str]]) -> Image.Image:
+    """把正在播放的文本渲染成透明底图（滚动时按窗口裁剪），按签名 + 文本缓存。"""
+    key = (_layer_signature(layer), tuple(text for _, text in lines))
+    cached = _lru_touch(_nowplaying_text_cache, key)
+    if cached is not None:
+        return cached
+    size = _layer_font_size(layer, "size", 26)
+    title_font = load_font(size, bold=True)
+    meta_font = load_font(max(9, int(round(size * 0.78))))
+    title_color = _rgb(layer.get("color", "#E2E8F0"))
+    meta_color = _rgb(layer.get("label_color", "#94A3B8"))
+    spacing = 4
+    width = 1
+    height = 0
+    rendered: list[tuple[str, ImageFont.ImageFont, tuple[int, int, int], int]] = []
+    for index, (kind, text) in enumerate(lines):
+        font = title_font if index == 0 else meta_font
+        color = title_color if index == 0 else meta_color
+        ascent, descent = font.getmetrics()
+        line_height = ascent + descent
+        width = max(width, int(math.ceil(_text_width(font, text))))
+        height += line_height + (spacing if index else 0)
+        rendered.append((text, font, color, line_height))
+    canvas = Image.new(
+        "RGBA",
+        (max(1, width + _SHADOW_OFFSET + 3), max(1, height + _SHADOW_OFFSET + 2)),
+        (0, 0, 0, 0),
+    )
+    draw = ImageDraw.Draw(canvas)
+    y = 0
+    for index, (text, font, color, line_height) in enumerate(rendered):
+        if index:
+            y += spacing
+        draw.text(
+            (_SHADOW_OFFSET, y + _SHADOW_OFFSET),
+            text,
+            font=font,
+            fill=(*_SHADOW_COLOR, 255),
+            anchor="lt",
+        )
+        draw.text((0, y), text, font=font, fill=color, anchor="lt")
+        y += line_height
+    _lru_put(_nowplaying_text_cache, key, canvas, _NOWPLAYING_TEXT_LIMIT)
+    return canvas
+
+
+def _cover_token(cover: Any) -> tuple | None:
+    """封面缩略指纹：4×4 缩略图 + 原始尺寸（比整图比对便宜得多，可作缓存键）。"""
+    if not isinstance(cover, Image.Image):
+        return None
+    try:
+        probe = cover.convert("RGB").resize((4, 4), Image.Resampling.BILINEAR)
+        return (cover.size, probe.tobytes())
+    except Exception:  # noqa: BLE001 - 无法读取的封面视为没有封面
+        return None
+
+
+def _cover_image(cover: Any, pixels: int) -> Image.Image | None:
+    """封面画成圆角方块：中心裁正方形 + LANCZOS 缩放 + 圆角遮罩，按指纹缓存。"""
+    if not isinstance(cover, Image.Image):
+        return None
+    pixels = max(4, int(pixels))
+    key = (_cover_token(cover), pixels)
+    if key[0] is None:
+        return None
+    cached = _lru_touch(_cover_cache, key)
+    if cached is not None:
+        return cached
+    try:
+        rgb = cover.convert("RGB")
+    except Exception:  # noqa: BLE001 - 已损坏的封面按没有封面处理
+        return None
+    width, height = rgb.size
+    side = min(width, height)
+    if side <= 0:
+        return None
+    left = (width - side) // 2
+    top = (height - side) // 2
+    square = rgb.crop((left, top, left + side, top + side))
+    image = square.resize((pixels, pixels), Image.Resampling.LANCZOS).convert("RGBA")
+    mask = Image.new("L", (pixels, pixels), 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        (0, 0, pixels - 1, pixels - 1),
+        radius=max(2, int(round(pixels * 0.12))),
+        fill=255,
+    )
+    image.putalpha(mask)
+    _lru_put(_cover_cache, key, image, _COVER_CACHE_LIMIT)
+    return image
+
+
+def _nowplaying_scroll_offset(layer: dict, t: float, natural_width: float) -> float:
+    """滚动相位：``t * speed`` 对 ``文本宽度 + 间隙`` 取模（末尾留空隙后再循环）。"""
+    speed = max(5.0, min(400.0, _clamped(layer.get("speed", 40.0), 5.0, 400.0, 40.0)))
+    gap = max(8.0, float(SCREEN_W) * 0.05)
+    period = max(1.0, float(natural_width) + gap)
+    return (max(0.0, float(t)) * speed) % period
+
+
+def _nowplaying_text_window(image: Image.Image, offset: float, width: int) -> Image.Image:
+    """从滚动文本条取 ``width`` 宽窗口：三份副本按周期拼接，实现无缝循环。"""
+    width = max(1, int(width))
+    height = max(1, int(image.height))
+    window = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    gap = max(8.0, float(SCREEN_W) * 0.05)
+    period = float(image.width) + gap
+    for step in (0, 1, 2):
+        x = int(round(-float(offset) + step * period))
+        if x > width or x + image.width < 0:
+            continue
+        window.paste(image, (x, 0), image)
+    return window
+
+
+def _draw_nowplaying_layer(
+    canvas: Image.Image,
+    draw: ImageDraw.ImageDraw,
+    layer: dict,
+    ctx: dict,
+    t: float,
+) -> None:
+    """正在播放：可选圆角封面 + 标题/作者文本；``scroll=True`` 时文本横向滚动。"""
+    snapshot = _media_snapshot(ctx)
+    lines = _nowplaying_lines(layer, snapshot)
+    placeholder = str(layer.get("placeholder") or "未在播放")
+    weak = _rgb(layer.get("label_color", "#94A3B8"))
+    placeholder_font = load_font(_layer_font_size(layer, "size", 26))
+    center_x = float(layer.get("x", 0.5)) * SCREEN_W
+    center_y = float(layer.get("y", 0.5)) * SCREEN_H
+    factor_x, factor_y = _anchor_factors(layer.get("anchor", "center"))
+    if not lines:
+        _paint_text_block(
+            draw,
+            [(placeholder, placeholder_font, weak)],
+            center_x,
+            center_y,
+            layer.get("anchor", "center"),
+            align="center",
+            shadow=False,
+        )
+        return
+    text_image = _nowplaying_text_image(layer, lines)
+    natural_width = text_image.width
+    cover_pixels = 0
+    if layer.get("show_cover", True):
+        cover_pixels = int(
+            round(_clamped(layer.get("cover_size", 0.22), 0.0, 1.0, 0.22) * SCREEN_W)
+        )
+    cover_image = _cover_image(snapshot.get("cover"), cover_pixels) if cover_pixels > 0 else None
+    if cover_image is None:
+        cover_pixels = 0
+    gap = 14.0 if cover_pixels else 0.0
+    margin = 16.0
+    allowed = max(40.0, float(SCREEN_W) - 2.0 * margin - cover_pixels - gap)
+    display_width = int(min(float(natural_width), allowed))
+    if bool(layer.get("scroll", False)) and natural_width > allowed:
+        offset = _nowplaying_scroll_offset(layer, t, natural_width)
+        window = _nowplaying_text_window(text_image, offset, display_width)
+    else:
+        window = text_image.crop((0, 0, min(text_image.width, display_width), text_image.height))
+    text_height = window.height
+    total_height = max(float(cover_pixels), float(text_height))
+    total_width = cover_pixels + gap + display_width
+    left = center_x - total_width * factor_x
+    top = center_y - total_height * factor_y
+    if cover_image is not None:
+        canv_left = int(round(left))
+        canv_top = int(round(top + (total_height - cover_pixels) / 2.0))
+        canvas.paste(cover_image, (canv_left, canv_top), cover_image)
+    text_left = int(round(left + cover_pixels + gap))
+    text_top = int(round(top + (total_height - text_height) / 2.0))
+    canvas.paste(window, (text_left, text_top), window)
+
+
+def _dispatch_plugin_layer(canvas: Image.Image, layer: dict, ctx: dict) -> None:
+    """未知图层类型交给 ``hydrohud.plugins.draw_layer``；缺失/返回假值/异常都静默跳过。"""
+    module = _plugins
+    if module is None:
+        return
+    drawer = getattr(module, "draw_layer", None)
+    if not callable(drawer):
+        return
+    staged, _staged_draw = _new_canvas()
+    try:
+        accepted = drawer(staged, layer, ctx)
+    except Exception:  # noqa: BLE001 - 插件异常绝不能影响整帧渲染
+        return
+    if not accepted:
+        return
+    canvas.paste(staged, (0, 0), staged)
+
+
 def _new_canvas() -> tuple[Image.Image, ImageDraw.ImageDraw]:
     canvas = Image.new("RGBA", (SCREEN_W, SCREEN_H), (0, 0, 0, 0))
     return canvas, ImageDraw.Draw(canvas)
@@ -1305,6 +2484,7 @@ def _new_canvas() -> tuple[Image.Image, ImageDraw.ImageDraw]:
 def _render_layer(layer: dict, t: float, ctx: dict) -> Image.Image:
     """把一个图层画到透明画布上（返回 RGBA 全屏图像）。"""
     canvas, draw = _new_canvas()
+    ctx["t"] = float(t)
     kind = layer.get("type")
     if kind == "text":
         _draw_text_layer(draw, layer, ctx)
@@ -1320,6 +2500,22 @@ def _render_layer(layer: dict, t: float, ctx: dict) -> Image.Image:
         _draw_gauge_layer(canvas, draw, layer, ctx)
     elif kind == "image":
         _draw_image_layer(canvas, layer, draw)
+    elif kind == "thermometer":
+        _draw_thermometer_layer(draw, layer, ctx, t)
+    elif kind == "countdown":
+        _draw_countdown_layer(draw, layer, ctx, t)
+    elif kind == "ticker":
+        _draw_ticker_layer(draw, layer, t, ctx)
+    elif kind == "sequence":
+        _draw_sequence_layer(canvas, draw, layer, t)
+    elif kind == "qrcode":
+        _draw_qrcode_layer(canvas, draw, layer, ctx)
+    elif kind == "weather":
+        _draw_weather_layer(draw, layer, ctx, t)
+    elif kind == "nowplaying":
+        _draw_nowplaying_layer(canvas, draw, layer, ctx, t)
+    else:
+        _dispatch_plugin_layer(canvas, layer, ctx)
     return canvas
 
 
@@ -1478,7 +2674,7 @@ def _build_entry(normalized: dict) -> dict:
     """构建场景渲染条目（静态部分一次性合成，动态图层留给逐帧绘制）。"""
     background = normalized["background"]
     layers = normalized["layers"]
-    dynamic_background = background.get("type") in ("gif", "video")
+    dynamic_background = background.get("type") in ("gif", "video", "capture")
 
     first_dynamic = len(layers)
     for index, layer in enumerate(layers):
@@ -1564,6 +2760,12 @@ def clear_cache() -> None:
         _layer_image_cache.clear()
         _placeholder_cache.clear()
         _tint_cache.clear()
+        _qr_matrix_cache.clear()
+        _qr_image_cache.clear()
+        _sequence_cache.clear()
+        _cover_cache.clear()
+        _nowplaying_text_cache.clear()
+        _capture_cache.clear()
 
 
 # 解释器退出时关闭 ffmpeg 子进程，避免残留进程与 "kill ffmpeg" 告警

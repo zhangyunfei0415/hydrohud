@@ -1,0 +1,90 @@
+# Test, lint and package HydroHUD.
+#
+# The test suite is pure software (no panel attached), so every job runs on a
+# plain GitHub runner. Only the packaging job is Windows-specific, because the
+# HID backend in hydrohud/device.py talks to hid.dll through ctypes.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.12", "3.13"]
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pytest black
+
+      - name: Run tests
+        run: python -m pytest tests -q
+
+  lint:
+    name: lint (black)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install black
+        run: python -m pip install black
+
+      - name: Check formatting
+        run: python -m black --check --line-length 100 hydrohud tests tools
+
+  build:
+    name: build Windows executable
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    needs: [test, lint]
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller
+
+      - name: Build HydroHUD.exe
+        run: powershell -ExecutionPolicy Bypass -File build.ps1
+
+      - name: Upload the executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: HydroHUD-windows
+          path: dist/HydroHUD.exe
+          if-no-files-found: error

@@ -13,6 +13,8 @@
 ``normalize_scene`` 会把任意残缺/多余的字典补全成规范形式：
 缺失字段使用默认值，未知字段/未知图层类型被丢弃，非法数值退回默认值，
 因此 GUI 可以放心把用户随手拼的字典交给它，渲染层也可以直接信任返回值。
+例外是**已注册的插件图层**（:mod:`hydrohud.plugins`）：它们只归一化位置与
+锚点，其余字段原样保留，供插件自行解释。
 """
 
 # MIT License
@@ -47,14 +49,25 @@ import re
 import tempfile
 from typing import Any
 
+try:  # 插件模块是可选的：缺失时插件图层按未知类型丢弃
+    from . import plugins as _plugins
+except Exception:  # noqa: BLE001 - 任何导入失败都退化为"无插件"
+    _plugins = None  # type: ignore[assignment]
+
 __all__ = [
     "SCENE_VERSION",
     "DEFAULT_BACKGROUND_COLOR",
     "DEFAULT_TEXT_COLOR",
+    "BACKGROUND_TYPES",
+    "FIT_MODES",
     "METRIC_IDS",
     "FALLBACK_METRICS",
     "LAYER_TYPES",
     "LAYER_TYPE_LABELS",
+    "WEATHER_FIELDS",
+    "NOWPLAYING_FIELDS",
+    "TICKER_DIRECTIONS",
+    "QR_ERROR_LEVELS",
     "normalize_scene",
     "preset_scenes",
     "load_project",
@@ -66,7 +79,7 @@ SCENE_VERSION = 1
 DEFAULT_BACKGROUND_COLOR = "#0B0F14"
 DEFAULT_TEXT_COLOR = "#FFFFFF"
 
-BACKGROUND_TYPES = ("solid", "image", "gif", "video")
+BACKGROUND_TYPES = ("solid", "image", "gif", "video", "capture")
 FIT_MODES = ("crop", "fit", "stretch")
 
 #: ``sensors`` 缺失时的指标兜底列表；正常路径下以 ``sensors.METRIC_IDS`` 为准。
@@ -104,7 +117,22 @@ except Exception:  # noqa: BLE001 - 任何导入失败都退化为兜底列表
 METRIC_IDS: tuple[str, ...] = tuple(_SENSOR_METRIC_IDS) or FALLBACK_METRICS
 
 #: 全部合法图层类型（顺序即 GUI "添加图层" 菜单顺序）。
-LAYER_TYPES: tuple[str, ...] = ("text", "clock", "sysinfo", "bars", "chart", "gauge", "image")
+LAYER_TYPES: tuple[str, ...] = (
+    "text",
+    "clock",
+    "sysinfo",
+    "bars",
+    "chart",
+    "gauge",
+    "image",
+    "thermometer",
+    "countdown",
+    "ticker",
+    "sequence",
+    "qrcode",
+    "weather",
+    "nowplaying",
+)
 
 #: 图层类型的中文名。
 LAYER_TYPE_LABELS: dict[str, str] = {
@@ -115,7 +143,24 @@ LAYER_TYPE_LABELS: dict[str, str] = {
     "chart": "折线图",
     "gauge": "仪表盘",
     "image": "图片",
+    "thermometer": "温度计",
+    "countdown": "倒计时",
+    "ticker": "滚动文字",
+    "sequence": "图片序列",
+    "qrcode": "二维码",
+    "weather": "天气",
+    "nowplaying": "正在播放",
 }
+
+#: ``weather`` 图层可显示的字段。
+WEATHER_FIELDS = ("temp", "feels", "humidity", "wind", "desc")
+
+#: ``nowplaying`` 图层可显示的字段。
+NOWPLAYING_FIELDS = ("title", "artist", "album")
+
+#: ``sequence`` / ``ticker`` 等图层的子选项。
+TICKER_DIRECTIONS = ("left", "right")
+QR_ERROR_LEVELS = ("L", "M", "Q", "H")
 
 #: 只接受 hex 颜色；tkinter.colorchooser 返回的也是这种格式。
 _COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
@@ -268,8 +313,35 @@ def _as_bound(value: Any) -> float | None:
     return number
 
 
+def _as_paths(value: Any, limit: int = 64) -> list[str]:
+    """把单个路径或路径列表规范成非空字符串列表（去重、限长）。"""
+    if isinstance(value, str):
+        items: list[Any] = [value]
+    elif isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        return []
+    paths: list[str] = []
+    for item in items:
+        text = _as_str(item).strip()
+        if text and text not in paths:
+            paths.append(text)
+        if len(paths) >= limit:
+            break
+    return paths
+
+
+def _as_choice(value: Any, allowed: tuple[str, ...], default: str) -> str:
+    """把值规范成 ``allowed`` 之一，否则返回 ``default``。"""
+    text = _as_str(value).strip().lower()
+    return text if text in allowed else default
+
+
 def _norm_layer(layer: Any) -> dict | None:
-    """规范化单个图层；未知类型返回 ``None``（由调用方丢弃）。"""
+    """规范化单个图层；未知类型返回 ``None``（由调用方丢弃）。
+
+    已注册的插件图层类型不做字段解释：只归一化位置/锚点并原样保留其它字段。
+    """
     layer = _as_dict(layer)
     kind = _as_str(layer.get("type")).strip().lower()
     base = {
@@ -399,7 +471,195 @@ def _norm_layer(layer: Any) -> dict | None:
         )
         return base
 
+    if kind == "thermometer":
+        base.update(
+            {
+                "type": "thermometer",
+                "metric": _as_metric(layer.get("metric"), "cpu_temp"),
+                "w": _clamp(_as_float(layer.get("w"), 0.14), 0.02, 1.0),
+                "h": _clamp(_as_float(layer.get("h"), 0.62), 0.05, 1.0),
+                "color": _as_color(layer.get("color"), "#FB7185"),
+                "track": _as_color(layer.get("track"), "#1E293B"),
+                "radius": _clamp(_as_float(layer.get("radius"), 0.5), 0.0, 1.0),
+                "label": _as_bool(layer.get("label"), True),
+                "show_value": _as_bool(layer.get("show_value"), True),
+                "size": _as_size(layer.get("size"), 20),
+                "value_size": _as_size(layer.get("value_size"), 34),
+                "show_unit": _as_bool(layer.get("show_unit"), True),
+                "min": _as_bound(layer.get("min")),
+                "max": _as_bound(layer.get("max")),
+            }
+        )
+        return base
+
+    if kind == "countdown":
+        base.update(
+            {
+                "type": "countdown",
+                "target": _as_str(layer.get("target")),
+                "title": _as_str(layer.get("title")),
+                "done_text": _as_str(layer.get("done_text"), "时间到") or "时间到",
+                "format": _as_str(layer.get("format"), "{d} 天 {h}:{m}:{s}")
+                or "{d} 天 {h}:{m}:{s}",
+                "size": _as_size(layer.get("size"), 44),
+                "title_size": _as_size(layer.get("title_size"), 22),
+                "color": _as_color(layer.get("color"), "#38BDF8"),
+                "title_color": _as_color(layer.get("title_color"), "#94A3B8"),
+                "shadow": _as_bool(layer.get("shadow"), True),
+            }
+        )
+        return base
+
+    if kind == "ticker":
+        base.update(
+            {
+                "type": "ticker",
+                "text": _as_text(layer.get("text")),
+                "size": _as_size(layer.get("size"), 34),
+                "color": _as_color(layer.get("color"), "#E2E8F0"),
+                "bold": _as_bool(layer.get("bold"), False),
+                "speed": _clamp(_as_float(layer.get("speed"), 60.0), 5.0, 600.0),
+                "gap": _clamp(_as_float(layer.get("gap"), 0.5), 0.0, 4.0),
+                "direction": _as_choice(layer.get("direction"), TICKER_DIRECTIONS, "left"),
+                "band": _as_bool(layer.get("band"), False),
+                "band_color": _as_color(layer.get("band_color"), "#0B0F14"),
+                "shadow": _as_bool(layer.get("shadow"), True),
+            }
+        )
+        return base
+
+    if kind == "sequence":
+        base.update(
+            {
+                "type": "sequence",
+                "paths": _as_paths(layer.get("paths")),
+                "fps": _clamp(_as_float(layer.get("fps"), 8.0), 0.5, 60.0),
+                "fit": _as_fit(layer.get("fit")),
+                "w": _clamp(_as_float(layer.get("w"), 0.5), 0.02, 1.0),
+                "h": _clamp(_as_float(layer.get("h"), 0.5), 0.02, 1.0),
+                "radius": _clamp(_as_float(layer.get("radius"), 0.0), 0.0, 1.0),
+                "loop": _as_bool(layer.get("loop"), True),
+                "opacity": _clamp(_as_float(layer.get("opacity"), 1.0), 0.0, 1.0),
+            }
+        )
+        return base
+
+    if kind == "qrcode":
+        base.update(
+            {
+                "type": "qrcode",
+                "data": _as_text(layer.get("data")),
+                "size": _clamp(_as_float(layer.get("size"), 0.5), 0.05, 1.0),
+                "fg": _as_color(layer.get("fg"), "#0B0F14"),
+                "bg": _as_color(layer.get("bg"), "#FFFFFF"),
+                "border": _as_size(layer.get("border"), 2, 0, 8),
+                "error": _as_choice(layer.get("error"), QR_ERROR_LEVELS, "M"),
+                "label": _as_bool(layer.get("label"), False),
+                "label_size": _as_size(layer.get("label_size"), 18),
+                "label_color": _as_color(layer.get("label_color"), DEFAULT_TEXT_COLOR),
+            }
+        )
+        return base
+
+    if kind == "weather":
+        base.update(
+            {
+                "type": "weather",
+                "lat": _as_bound(layer.get("lat")),
+                "lon": _as_bound(layer.get("lon")),
+                "place": _as_str(layer.get("place")),
+                "fields": _as_fields(layer.get("fields"), WEATHER_FIELDS, ("temp", "desc")),
+                "icon": _as_bool(layer.get("icon"), True),
+                "icon_size": _as_size(layer.get("icon_size"), 56),
+                "size": _as_size(layer.get("size"), 28),
+                "color": _as_color(layer.get("color"), "#E2E8F0"),
+                "shadow": _as_bool(layer.get("shadow"), True),
+                "separator": _as_str(layer.get("separator"), "  ") or "  ",
+            }
+        )
+        return base
+
+    if kind == "nowplaying":
+        base.update(
+            {
+                "type": "nowplaying",
+                "fields": _as_fields(layer.get("fields"), NOWPLAYING_FIELDS, ("title", "artist")),
+                "show_cover": _as_bool(layer.get("show_cover"), True),
+                "cover_size": _clamp(_as_float(layer.get("cover_size"), 0.22), 0.0, 0.8),
+                "size": _as_size(layer.get("size"), 26),
+                "color": _as_color(layer.get("color"), "#E2E8F0"),
+                "label_color": _as_color(layer.get("label_color"), "#94A3B8"),
+                "separator": _as_str(layer.get("separator"), " · ") or " · ",
+                "placeholder": _as_str(layer.get("placeholder"), "未在播放") or "未在播放",
+                "scroll": _as_bool(layer.get("scroll"), False),
+                "speed": _clamp(_as_float(layer.get("speed"), 40.0), 5.0, 600.0),
+            }
+        )
+        return base
+
+    if _is_plugin_layer(kind):
+        return _norm_plugin_layer(layer, kind, base)
+
     return None
+
+
+_UNSAFE = object()
+
+
+def _is_plugin_layer(kind: str) -> bool:
+    """``kind`` 是否是已注册的插件图层类型；``plugins`` 缺失时恒为 ``False``。"""
+    module = _plugins
+    if module is None or not kind:
+        return False
+    checker = getattr(module, "is_registered", None)
+    if not callable(checker):
+        return False
+    try:
+        return bool(checker(kind))
+    except Exception:  # noqa: BLE001 - 插件注册表异常时按未知类型处理
+        return False
+
+
+def _json_safe(value: Any) -> Any:
+    """返回可直接进 JSON 的副本；无法序列化的值返回 :data:`_UNSAFE` 由调用方丢弃。"""
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        if isinstance(value, float) and not math.isfinite(value):
+            return _UNSAFE
+        return value
+    if isinstance(value, (list, tuple)):
+        items: list[Any] = []
+        for item in value:
+            safe = _json_safe(item)
+            if safe is _UNSAFE:
+                return _UNSAFE
+            items.append(safe)
+        return items
+    if isinstance(value, dict):
+        mapping: dict[str, Any] = {}
+        for key, item in value.items():
+            safe = _json_safe(item)
+            if safe is _UNSAFE:
+                return _UNSAFE
+            mapping[str(key)] = safe
+        return mapping
+    return _UNSAFE
+
+
+def _norm_plugin_layer(layer: dict, kind: str, base: dict) -> dict:
+    """规范化插件图层：``type`` / ``x`` / ``y`` / ``anchor`` 归一化，其余字段原样保留。
+
+    插件自行解释自己的字段，这里只保证值能写进 JSON（场景会被写盘、经 HTTP
+    API 传输），无法序列化的字段被丢弃。
+    """
+    result: dict[str, Any] = {"type": kind}
+    for key, value in layer.items():
+        if key in ("type", "x", "y", "anchor"):
+            continue
+        safe = _json_safe(value)
+        if safe is not _UNSAFE:
+            result[str(key)] = safe
+    result.update(base)
+    return result
 
 
 def _as_align(value: Any, default: str) -> str:
@@ -426,11 +686,25 @@ def normalize_scene(scene: dict) -> dict:
     bg_type = _as_str(background.get("type")).strip().lower()
     if bg_type not in BACKGROUND_TYPES:
         bg_type = "solid"
+    region_raw = background.get("region")
+    region: list[float] = []
+    if isinstance(region_raw, (list, tuple)) and len(region_raw) == 4:
+        for value in region_raw:
+            region.append(_clamp(_as_float(value, 0.0), 0.0, 1.0))
+    if len(region) != 4:
+        region = [0.0, 0.0, 1.0, 1.0]
+    if region[2] <= 0.0:
+        region[2] = 1.0
+    if region[3] <= 0.0:
+        region[3] = 1.0
     normalized_bg = {
         "type": bg_type,
         "color": _as_color(background.get("color"), DEFAULT_BACKGROUND_COLOR),
         "path": _as_str(background.get("path")),
         "fit": _as_fit(background.get("fit")),
+        "region": region,
+        "fps": _clamp(_as_float(background.get("fps"), 5.0), 0.5, 30.0),
+        "monitor": _as_size(background.get("monitor"), 0, 0, 8),
     }
 
     tint_raw = _as_dict(raw.get("tint"))

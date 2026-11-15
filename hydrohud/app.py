@@ -27,6 +27,7 @@ import json
 import os
 import queue
 import re
+import shutil
 import sys
 import threading
 import time
@@ -77,6 +78,26 @@ def _raise_timer_resolution() -> None:
         _warn_once(f"无法提升定时器精度，帧率可能低于目标：{exc}")
 
 
+def _app_data_dir() -> str:
+    """用户数据目录（与 settings 模块保持一致），缺失模块时退回本地实现。"""
+    if settings_mod is not None:
+        try:
+            return str(settings_mod.app_data_dir())
+        except Exception as exc:  # 目录算不出来只影响素材库位置
+            _warn_once(f"解析用户数据目录失败：{exc}")
+    return os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "HydroHUD")
+
+
+def _plugin_dir() -> str:
+    """插件目录，插件模块不可用时退回用户数据目录下的 plugins。"""
+    if plugins_mod is not None:
+        try:
+            return str(plugins_mod.plugin_dir())
+        except Exception as exc:
+            _warn_once(f"解析插件目录失败：{exc}")
+    return os.path.join(_app_data_dir(), PLUGIN_DIR_NAME)
+
+
 def _import_optional(module_name: str) -> Any:
     """先按包内相对导入，再按顶层绝对导入加载可选模块。"""
     if __package__ not in (None, ""):
@@ -112,6 +133,14 @@ tray_mod = _import_optional("tray")
 hotkeys_mod = _import_optional("hotkeys")
 playlist_mod = _import_optional("playlist")
 diagnostics_mod = _import_optional("diagnostics")
+history_mod = _import_optional("history")
+editor_mod = _import_optional("editor")
+weather_mod = _import_optional("weather")
+media_mod = _import_optional("media")
+capture_mod = _import_optional("capture")
+plugins_mod = _import_optional("plugins")
+api_mod = _import_optional("api")
+themepack_mod = _import_optional("themepack")
 
 try:  # 版本号来自包 __init__，缺失时退回内置值
     from . import __version__ as APP_VERSION
@@ -128,6 +157,10 @@ PLAYLIST_DEFAULT_INTERVAL = 30.0
 HOTKEY_TOGGLE_STREAM = "ctrl+alt+s"
 HOTKEY_NEXT_PROJECT = "ctrl+alt+n"
 HOTKEY_SHOW_WINDOW = "ctrl+alt+l"
+API_DEFAULT_PORT = 4780
+THEME_PACK_FILETYPES = [("HydroHUD 主题包", "*.hudpack"), ("所有文件", "*.*")]
+PLUGIN_DIR_NAME = "plugins"
+VENDOR_ASSET_DIR = r"C:\Program Files (x86)\TcomasSoftware"
 
 # --------------------------------------------------------------------------- #
 # 主题
@@ -152,8 +185,14 @@ ENTRY_BG = "#0A1017"
 SELECT_BG = "#0E4A63"
 DARK_INK = "#04121C"
 
-BG_TYPE_LABELS = ("纯色", "图片", "GIF 动图", "视频")
-BG_TYPE_BY_LABEL = {"纯色": "solid", "图片": "image", "GIF 动图": "gif", "视频": "video"}
+BG_TYPE_LABELS = ("纯色", "图片", "GIF 动图", "视频", "屏幕捕获")
+BG_TYPE_BY_LABEL = {
+    "纯色": "solid",
+    "图片": "image",
+    "GIF 动图": "gif",
+    "视频": "video",
+    "屏幕捕获": "capture",
+}
 BG_LABEL_BY_TYPE = {value: label for label, value in BG_TYPE_BY_LABEL.items()}
 FIT_LABELS = ("裁剪填满", "完整显示", "拉伸铺满")
 FIT_BY_LABEL = {"裁剪填满": "crop", "完整显示": "fit", "拉伸铺满": "stretch"}
@@ -396,6 +435,13 @@ def _fallback_normalize(scene: Any) -> dict:
         "path": str(bg_raw.get("path") or ""),
         "fit": bg_raw.get("fit") if bg_raw.get("fit") in FIT_LABEL_BY_CODE else "crop",
     }
+    if bg_type == "capture":
+        region = bg_raw.get("region")
+        if not (isinstance(region, list) and len(region) == 4):
+            region = [0.0, 0.0, 1.0, 1.0]
+        background["region"] = [_safe_float(item, 0.0, 0.0, 1.0) for item in region]
+        background["monitor"] = int(_safe_float(bg_raw.get("monitor"), 0, 0, 8))
+        background["fps"] = _safe_float(bg_raw.get("fps"), 5.0, 0.5, 30.0)
     tint_raw = raw.get("tint") if isinstance(raw.get("tint"), dict) else {}
     tint = {
         "color": _norm_color(tint_raw.get("color"), "#000000"),
@@ -808,6 +854,21 @@ class App(tk.Tk):
         self._drop_proc: Any | None = None
         self._drop_hwnd: int | None = None
         self._hotkey_ok: list[str] = []
+        self._history: Any | None = None
+        self._canvas_editor: Any | None = None
+        self._editor_mode = False
+        self._plugin_row: tk.Frame | None = None
+        self._api: Any | None = None
+        self._api_host: Any | None = None
+        self._api_status: dict = {}
+        self._ticker_var: tk.StringVar | None = None
+        self._canvas_pending_base: dict | None = None
+
+        if history_mod is not None:
+            try:
+                self._history = history_mod.History()
+            except Exception as exc:  # 历史栈不可用只影响撤销，不影响编辑
+                _warn_once(f"撤销栈初始化失败：{exc}")
 
         self.scene: dict = self._initial_scene()
 
@@ -830,6 +891,9 @@ class App(tk.Tk):
         self.bind_all("<Control-o>", lambda _event: self._on_open_project())
         self.bind_all("<Control-s>", lambda _event: self._on_save_project())
         self.bind_all("<Control-Shift-S>", lambda _event: self._on_save_project_as())
+        self.bind_all("<Control-z>", lambda _event: self._undo())
+        self.bind_all("<Control-y>", lambda _event: self._redo())
+        self.bind_all("<Control-e>", lambda _event: self._toggle_canvas_edit())
 
         self._preview_worker = RenderWorker(self)
         self.after(PREVIEW_INTERVAL_MS, self._preview_tick)
@@ -1068,6 +1132,31 @@ class App(tk.Tk):
         device_menu.add_command(label="开始推送到屏幕", command=self._on_start_stream)
         device_menu.add_command(label="停止推送", command=self._on_stop_stream)
         menubar.add_cascade(label="设备", menu=device_menu)
+
+        edit_menu = tk.Menu(menubar, **menu_options)
+        edit_menu.add_command(label="撤销", accelerator="Ctrl+Z", command=self._undo)
+        edit_menu.add_command(label="重做", accelerator="Ctrl+Y", command=self._redo)
+        edit_menu.add_separator()
+        edit_menu.add_command(
+            label="画布编辑（拖动图层）", accelerator="Ctrl+E", command=self._toggle_canvas_edit
+        )
+        menubar.add_cascade(label="编辑", menu=edit_menu)
+
+        theme_menu = tk.Menu(menubar, **menu_options)
+        theme_menu.add_command(label="导出主题包…", command=self._on_export_theme)
+        theme_menu.add_command(label="导入主题包…", command=self._on_import_theme)
+        theme_menu.add_separator()
+        theme_menu.add_command(label="导入官方素材到素材库", command=self._on_import_vendor_assets)
+        menubar.add_cascade(label="主题包", menu=theme_menu)
+
+        plugin_menu = tk.Menu(menubar, **menu_options)
+        plugin_menu.add_command(label="重载图层插件", command=self._on_reload_plugins)
+        menubar.add_cascade(label="插件", menu=plugin_menu)
+
+        advanced_menu = tk.Menu(menubar, **menu_options)
+        advanced_menu.add_command(label="启动 / 停止本地 API", command=self._on_toggle_api)
+        advanced_menu.add_command(label="复制 API Token", command=self._on_copy_api_token)
+        menubar.add_cascade(label="高级", menu=advanced_menu)
 
         window_menu = tk.Menu(menubar, **menu_options)
         window_menu.add_command(label="隐藏到系统托盘", command=self._hide_to_tray)
@@ -1501,6 +1590,47 @@ class App(tk.Tk):
         self._bg_fit_combo.bind("<<ComboboxSelected>>", self._on_bg_fit_changed)
         row += 1
 
+        self._grid_label(content, row, "捕获区域")
+        capture_holder = tk.Frame(content, bg=CARD)
+        capture_holder.grid(row=row, column=1, sticky="ew", pady=2)
+        self._capture_labels: dict[str, tk.Label] = {}
+        self._capture_scales: dict[str, ttk.Scale] = {}
+        for key, caption, low, high, default in (
+            ("region_x", "X", 0.0, 1.0, 0.0),
+            ("region_y", "Y", 0.0, 1.0, 0.0),
+            ("region_w", "宽", 0.05, 1.0, 1.0),
+            ("region_h", "高", 0.05, 1.0, 1.0),
+            ("capture_fps", "帧率", 0.5, 30.0, 5.0),
+        ):
+            line = tk.Frame(capture_holder, bg=CARD)
+            line.pack(fill="x")
+            caption_label = self._label(line, caption, size=8, color=MUTED, bg=CARD)
+            caption_label.configure(width=4)
+            caption_label.pack(side="left")
+            value_label = self._label(
+                line,
+                f"{default:.2f}" if key != "capture_fps" else f"{int(default)}",
+                size=8,
+                color=ACCENT,
+                bold=True,
+                bg=CARD,
+            )
+            value_label.configure(width=5)
+            value_label.pack(side="right")
+            scale = ttk.Scale(
+                line,
+                from_=low,
+                to=high,
+                value=default,
+                command=lambda raw, field_key=key, lbl=value_label, decimals=(
+                    0 if key == "capture_fps" else 2
+                ): self._on_capture_scale(field_key, raw, lbl, decimals),
+            )
+            scale.pack(side="left", fill="x", expand=True, padx=(4, 4))
+            self._capture_labels[key] = value_label
+            self._capture_scales[key] = scale
+        row += 1
+
         ttk.Separator(content, orient="horizontal").grid(
             row=row, column=0, columnspan=2, sticky="ew", pady=10
         )
@@ -1582,6 +1712,13 @@ class App(tk.Tk):
                 ("＋ 折线图", "chart"),
                 ("＋ 仪表盘", "gauge"),
                 ("＋ 图片", "image"),
+                ("＋ 温度计", "thermometer"),
+                ("＋ 倒计时", "countdown"),
+                ("＋ 滚动文字", "ticker"),
+                ("＋ 图片序列", "sequence"),
+                ("＋ 二维码", "qrcode"),
+                ("＋ 天气", "weather"),
+                ("＋ 正在播放", "nowplaying"),
             )
         ):
             row_index, column_index = divmod(index, 3)
@@ -1591,6 +1728,11 @@ class App(tk.Tk):
                 style="Small.TButton",
                 command=lambda layer_kind=kind: self._add_layer(layer_kind),
             ).grid(row=row_index, column=column_index, sticky="ew", padx=2, pady=2)
+
+        self._plugin_row = tk.Frame(content, bg=CARD)
+        self._plugin_row.pack(fill="x", pady=(2, 4))
+        for column in range(3):
+            self._plugin_row.grid_columnconfigure(column, weight=1)
 
         ttk.Separator(content, orient="horizontal").pack(fill="x", pady=6)
         self._layer_editor = tk.Frame(content, bg=CARD)
@@ -1685,10 +1827,20 @@ class App(tk.Tk):
         with self._scene_lock:
             return copy.deepcopy(self.scene)
 
-    def _edit_scene(self, mutator: Callable[[dict], dict]) -> None:
+    def _edit_scene(
+        self,
+        mutator: Callable[[dict], dict],
+        label: str = "",
+        coalesce_key: str | None = None,
+    ) -> None:
         """在锁内修改场景并归一化；任何异常都只提示，不崩 UI。"""
         try:
             with self._scene_lock:
+                if self._history is not None:
+                    try:
+                        self._history.push(self.scene, label, coalesce_key)
+                    except Exception as exc:  # 撤销栈坏了不能阻断编辑
+                        _warn_once(f"记录撤销点失败：{exc}")
                 updated = mutator(copy.deepcopy(self.scene))
                 self.scene = self._normalize(updated)
                 self._dirty = True
@@ -1696,6 +1848,11 @@ class App(tk.Tk):
             self._set_status(f"场景更新失败：{exc}", "error")
             return
         self._update_project_label()
+        if self._editor_mode and self._canvas_editor is not None:
+            try:
+                self._canvas_editor.refresh()
+            except Exception as exc:
+                _warn_once(f"画布编辑器刷新失败：{exc}")
 
     def _sync_ui_from_scene(self) -> None:
         self._syncing = True
@@ -1993,6 +2150,12 @@ class App(tk.Tk):
 
     def _show_preview_image(self, source: Image.Image) -> None:
         self._last_frame_img = source
+        if self._editor_mode and self._canvas_editor is not None:
+            try:
+                self._canvas_editor.set_image(source)
+            except Exception as exc:  # 画布底图失败不影响推流/预览线程
+                _warn_once(f"画布编辑器底图更新失败：{exc}")
+            return
         side = self._preview_side
         display = source
         if source.size != (side, side):
@@ -2051,6 +2214,7 @@ class App(tk.Tk):
         return label
 
     def _set_background(self, **changes: Any) -> None:
+        coalesce = changes.pop("coalesce", None)
         if self._syncing:
             return
 
@@ -2062,7 +2226,7 @@ class App(tk.Tk):
             scene["background"] = background
             return scene
 
-        self._edit_scene(mutate)
+        self._edit_scene(mutate, label="修改背景", coalesce_key=coalesce)
         self._sync_background_controls()
 
     def _sync_background_controls(self) -> None:
@@ -2091,10 +2255,38 @@ class App(tk.Tk):
         self._tint_alpha_var.set(alpha * 100.0)
         self._tint_alpha_label.configure(text=f"{int(round(alpha * 100))}%")
         is_solid = bg_type == "solid"
+        is_capture = bg_type == "capture"
         self._set_widget_enabled(self._bg_color_btn, is_solid)
-        self._set_widget_enabled(self._bg_file_btn, not is_solid)
-        self._set_widget_enabled(self._bg_fit_combo, not is_solid)
+        self._set_widget_enabled(self._bg_file_btn, not is_solid and not is_capture)
+        self._set_widget_enabled(self._bg_fit_combo, not is_solid and not is_capture)
         self._bg_color_swatch.configure(fg=BORDER if is_solid else MUTED)
+        region = background.get("region")
+        if not (isinstance(region, list) and len(region) == 4):
+            region = [0.0, 0.0, 1.0, 1.0]
+        values = [
+            _safe_float(region[0], 0.0, 0.0, 1.0),
+            _safe_float(region[1], 0.0, 0.0, 1.0),
+            _safe_float(region[2], 1.0, 0.05, 1.0),
+            _safe_float(region[3], 1.0, 0.05, 1.0),
+            _safe_float(background.get("fps"), 5.0, 0.5, 30.0),
+        ]
+        for key, value in zip(
+            ("region_x", "region_y", "region_w", "region_h", "capture_fps"), values
+        ):
+            scale = self._capture_scales.get(key) if hasattr(self, "_capture_scales") else None
+            label = self._capture_labels.get(key) if hasattr(self, "_capture_labels") else None
+            if scale is None:
+                continue
+            try:
+                scale.set(value)
+            except tk.TclError:  # 控件已销毁
+                continue
+            if label is not None:
+                label.configure(
+                    text=f"{value:.2f}" if key != "capture_fps" else f"{int(round(value))}"
+                )
+        for key, scale in (getattr(self, "_capture_scales", {}) or {}).items():
+            self._set_widget_enabled(scale, is_capture)
 
     @staticmethod
     def _set_widget_enabled(widget: tk.Widget, enabled: bool) -> None:
@@ -2123,6 +2315,29 @@ class App(tk.Tk):
 
     def _on_bg_fit_changed(self, _event: tk.Event | None = None) -> None:
         self._set_background(fit=FIT_BY_LABEL.get(self._bg_fit_var.get(), "crop"))
+
+    def _on_capture_scale(self, key: str, raw: str, label: tk.Label | None, decimals: int) -> None:
+        """屏幕捕获区域滑块的实时回调：只改内存并在松手时写场景。"""
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return
+        if label is not None:
+            label.configure(text=f"{value:.{decimals}f}" if decimals else f"{int(round(value))}")
+        background = self.scene.get("background") or {}
+        if not isinstance(background, dict):
+            background = {}
+        region = background.get("region")
+        if not (isinstance(region, list) and len(region) == 4):
+            region = [0.0, 0.0, 1.0, 1.0]
+        region = [_safe_float(item, 0.0, 0.0, 1.0) for item in region]
+        if key.startswith("region_"):
+            index = {"region_x": 0, "region_y": 1, "region_w": 2, "region_h": 3}[key]
+            low = 0.05 if index >= 2 else 0.0
+            region[index] = _safe_float(value, region[index], low, 1.0)
+            self._set_background(region=region, coalesce="capture-region")
+        else:
+            self._set_background(fps=_safe_float(value, 5.0, 0.5, 30.0), coalesce="capture-fps")
 
     def _choose_background_file(self) -> None:
         path = filedialog.askopenfilename(
@@ -2345,6 +2560,135 @@ class App(tk.Tk):
                 "size": 20,
                 "value_size": 46,
             }
+        elif kind == "thermometer":
+            layer = {
+                "type": "thermometer",
+                "metric": "cpu_temp",
+                "x": 0.08,
+                "y": 0.5,
+                "w": 0.14,
+                "h": 0.62,
+                "color": "#FB7185",
+                "track": "#1E293B",
+                "radius": 0.5,
+                "label": True,
+                "show_value": True,
+                "size": 20,
+                "value_size": 34,
+            }
+        elif kind == "countdown":
+            target = simpledialog.askstring(
+                "倒计时",
+                "目标时间（YYYY-MM-DD HH:MM[:SS]）",
+                parent=self,
+                initialvalue="2026-01-01 00:00",
+            )
+            if not target:
+                return
+            layer = {
+                "type": "countdown",
+                "target": target.strip(),
+                "title": "",
+                "x": 0.5,
+                "y": 0.5,
+                "size": 44,
+                "color": "#38BDF8",
+                "shadow": True,
+            }
+        elif kind == "ticker":
+            text = simpledialog.askstring(
+                "滚动文字",
+                "要滚动显示的文字",
+                parent=self,
+                initialvalue="HydroHUD 开源水冷屏控制台",
+            )
+            if not text:
+                return
+            layer = {
+                "type": "ticker",
+                "text": text,
+                "x": 0.5,
+                "y": 0.92,
+                "size": 34,
+                "color": "#E2E8F0",
+                "bold": False,
+                "speed": 60.0,
+                "gap": 0.5,
+                "direction": "left",
+                "band": False,
+                "shadow": True,
+            }
+        elif kind == "sequence":
+            paths = filedialog.askopenfilenames(
+                title="选择图片序列", filetypes=IMG_FILETYPES, parent=self
+            )
+            if not paths:
+                return
+            layer = {
+                "type": "sequence",
+                "paths": list(paths),
+                "x": 0.5,
+                "y": 0.5,
+                "w": 0.5,
+                "h": 0.5,
+                "fps": 8.0,
+                "fit": "crop",
+                "loop": True,
+                "opacity": 1.0,
+            }
+        elif kind == "qrcode":
+            data = simpledialog.askstring(
+                "二维码",
+                "要编码的内容",
+                parent=self,
+                initialvalue="https://github.com/zhangyunfei0415/hydrohud",
+            )
+            if not data:
+                return
+            layer = {
+                "type": "qrcode",
+                "data": data,
+                "x": 0.5,
+                "y": 0.5,
+                "size": 0.5,
+                "fg": "#0B0F14",
+                "bg": "#FFFFFF",
+                "border": 2,
+                "error": "M",
+                "label": False,
+            }
+        elif kind == "weather":
+            place = simpledialog.askstring(
+                "天气", "城市名（留空用北京默认坐标）", parent=self, initialvalue=""
+            )
+            if place is None:
+                return
+            layer = {
+                "type": "weather",
+                "place": place.strip(),
+                "x": 0.5,
+                "y": 0.12,
+                "fields": ["temp", "desc"],
+                "icon": True,
+                "icon_size": 56,
+                "size": 28,
+                "color": "#E2E8F0",
+                "shadow": True,
+            }
+        elif kind == "nowplaying":
+            layer = {
+                "type": "nowplaying",
+                "x": 0.5,
+                "y": 0.88,
+                "fields": ["title", "artist"],
+                "show_cover": True,
+                "cover_size": 0.22,
+                "size": 26,
+                "color": "#E2E8F0",
+                "label_color": "#94A3B8",
+                "separator": " · ",
+                "placeholder": "未在播放",
+            }
         else:
             return
 
@@ -2396,10 +2740,481 @@ class App(tk.Tk):
         self._layer_index = target
         self._refresh_layer_list()
 
-    def _apply_layer_field(self, key: str, value: Any) -> None:
+    # -- 撤销 / 重做 ---------------------------------------------------- #
+    def _record_history(self, label: str = "", coalesce_key: str | None = None) -> None:
+        """把当前场景压入撤销栈；必须在整块替换场景之前调用。"""
+        if self._history is None:
+            return
+        try:
+            self._history.push(self._snapshot_scene(), label, coalesce_key)
+        except Exception as exc:  # 撤销栈坏了不能阻断编辑
+            _warn_once(f"记录撤销点失败：{exc}")
+
+    def _replace_scene(self, scene: dict, message: str, *, label: str = "载入场景") -> None:
+        """整块替换当前场景（载入预设 / 工程 / 主题包 / 撤销共用）。"""
+        self._record_history(label)
+        self.scene = self._normalize(copy.deepcopy(scene))
+        self._layer_index = -1
+        self._sync_ui_from_scene()
+        if self._editor_mode and self._canvas_editor is not None:
+            try:
+                self._canvas_editor.refresh()
+            except Exception as exc:
+                _warn_once(f"画布编辑器刷新失败：{exc}")
+        self._set_status(message, "ok")
+
+    def _text_focus_active(self) -> bool:
+        """焦点在文本输入控件时让 Ctrl+Z / Ctrl+Y 留给控件本身。"""
+        widget = self.focus_get()
+        return isinstance(widget, (tk.Entry, tk.Text, tk.Spinbox, ttk.Entry, ttk.Combobox))
+
+    def _undo(self) -> None:
+        if self._text_focus_active():
+            return
+        if self._history is None:
+            self._set_status("撤销不可用：history 模块未加载", "warn")
+            return
+        state = self._history.undo()
+        if state is None:
+            self._set_status("没有可撤销的操作", "warn")
+            return
+        self.scene = self._normalize(copy.deepcopy(state))
+        self._layer_index = -1
+        self._dirty = bool(getattr(self._history, "is_dirty", True))
+        self._sync_ui_from_scene()
+        if self._editor_mode and self._canvas_editor is not None:
+            try:
+                self._canvas_editor.refresh()
+            except Exception as exc:
+                _warn_once(f"画布编辑器刷新失败：{exc}")
+        self._set_status("已撤销", "ok")
+
+    def _redo(self) -> None:
+        if self._text_focus_active():
+            return
+        if self._history is None:
+            self._set_status("重做不可用：history 模块未加载", "warn")
+            return
+        state = self._history.redo()
+        if state is None:
+            self._set_status("没有可重做的操作", "warn")
+            return
+        self.scene = self._normalize(copy.deepcopy(state))
+        self._layer_index = -1
+        self._dirty = bool(getattr(self._history, "is_dirty", True))
+        self._sync_ui_from_scene()
+        if self._editor_mode and self._canvas_editor is not None:
+            try:
+                self._canvas_editor.refresh()
+            except Exception as exc:
+                _warn_once(f"画布编辑器刷新失败：{exc}")
+        self._set_status("已重做", "ok")
+
+    # -- 画布编辑模式 ---------------------------------------------------- #
+    def _ensure_canvas_editor(self) -> Any | None:
+        if self._canvas_editor is not None or editor_mod is None:
+            return self._canvas_editor
+        try:
+            self._canvas_editor = editor_mod.CanvasEditor(
+                self._preview_holder,
+                get_scene=self._snapshot_scene,
+                apply_scene=self._on_canvas_apply,
+                on_select=self._on_canvas_select,
+                on_commit=self._on_canvas_commit,
+            )
+        except Exception as exc:
+            self._set_status(f"画布编辑器初始化失败：{exc}", "error")
+            self._canvas_editor = None
+        return self._canvas_editor
+
+    def _toggle_canvas_edit(self) -> None:
+        if editor_mod is None:
+            self._set_status("画布编辑器未就绪（hydrohud/editor.py 缺失）", "warn")
+            return
+        if not self._editor_mode:
+            editor = self._ensure_canvas_editor()
+            if editor is None:
+                return
+            self._editor_mode = True
+            self._canvas.place_forget()
+            try:
+                editor.place(relx=0.5, rely=0.5, anchor="center")
+                editor.refresh()
+                if self._last_frame_img is not None:
+                    editor.set_image(self._last_frame_img)
+            except Exception as exc:
+                self._editor_mode = False
+                self._set_status(f"进入画布编辑失败：{exc}", "error")
+                return
+            self._set_status("画布编辑模式：拖动图层，松开鼠标记录撤销点", "ok")
+        else:
+            self._editor_mode = False
+            try:
+                self._canvas_editor.place_forget()
+            except Exception:  # 已销毁
+                pass
+            self._canvas.place(relx=0.5, rely=0.5, anchor="center")
+            if self._last_frame_img is not None:
+                self._show_preview_image(self._last_frame_img)
+            self._set_status("已退出画布编辑模式", "ok")
+
+    def _on_canvas_apply(self, scene: dict, label: str = "") -> None:
+        """画布拖动过程中的高频回传：不记撤销点（松开鼠标时由 on_commit 记）。"""
+        if self._canvas_pending_base is None:
+            self._canvas_pending_base = self._snapshot_scene()
+        try:
+            with self._scene_lock:
+                self.scene = self._normalize(copy.deepcopy(scene))
+                self._dirty = True
+        except Exception as exc:
+            _warn_once(f"画布修改未生效：{exc}")
+            return
+        self._update_project_label()
+        self._refresh_layer_list()
+
+    def _on_canvas_commit(self, label: str = "") -> None:
+        base = self._canvas_pending_base
+        self._canvas_pending_base = None
+        if base is not None and self._history is not None:
+            try:
+                self._history.push(base, label or "画布调整")
+            except Exception as exc:
+                _warn_once(f"记录撤销点失败：{exc}")
+        self._dirty = True
+        self._update_project_label()
+        self._set_status(f"已{label or '调整'}图层", "ok")
+
+    def _on_canvas_select(self, index: int | None) -> None:
+        self._suppress_layer_event = True
+        try:
+            self._layer_index = -1 if index is None else int(index)
+            self._refresh_layer_list()
+        finally:
+            self._suppress_layer_event = False
+        self._rebuild_layer_editor()
+
+    # -- 主题包（.hudpack） ---------------------------------------------- #
+    def _on_export_theme(self) -> None:
+        if themepack_mod is None:
+            self._set_status("主题包模块未就绪（hydrohud/themepack.py 缺失）", "warn")
+            return
+        path = filedialog.asksaveasfilename(
+            title="导出主题包",
+            defaultextension=".hudpack",
+            filetypes=THEME_PACK_FILETYPES,
+            parent=self,
+            initialfile=f"{self.scene.get('name') or 'theme'}.hudpack",
+        )
+        if not path:
+            return
+        try:
+            result = themepack_mod.export_pack(
+                self._snapshot_scene(), path, name=str(self.scene.get("name") or "")
+            )
+        except Exception as exc:
+            self._set_status(f"导出主题包失败：{exc}", "error")
+            return
+        message = f"已导出主题包（{result.get('assets', 0)} 个素材 · {result.get('bytes', 0) / 1024:.0f} KB）"
+        missing = result.get("missing") or []
+        if missing:
+            message += f"，{len(missing)} 个素材缺失已跳过"
+        self._set_status(message, "ok")
+        if missing:
+            messagebox.showwarning(
+                "部分素材缺失",
+                "以下素材不存在，未打进主题包：\n" + "\n".join(missing[:8]),
+                parent=self,
+            )
+
+    def _on_import_theme(self) -> None:
+        if themepack_mod is None:
+            self._set_status("主题包模块未就绪（hydrohud/themepack.py 缺失）", "warn")
+            return
+        path = filedialog.askopenfilename(
+            title="导入主题包", filetypes=THEME_PACK_FILETYPES, parent=self
+        )
+        if not path:
+            return
+        try:
+            result = themepack_mod.import_pack(path)
+        except Exception as exc:
+            self._set_status(f"导入主题包失败：{exc}", "error")
+            messagebox.showerror("导入主题包失败", str(exc), parent=self)
+            return
+        self.project_path = None
+        self._current_preset_name = None
+        self._replace_scene(
+            result["scene"],
+            f"已导入主题包「{result.get('name') or os.path.basename(path)}」（{result.get('assets', 0)} 个素材）",
+            label="导入主题包",
+        )
+        self._dirty = False
+        self._update_project_label()
+
+    def _on_import_vendor_assets(self) -> None:
+        """把官方 TCOMAS 软件自带素材复制到用户素材库，方便直接当背景用。"""
+        root = VENDOR_ASSET_DIR
+        if not os.path.isdir(root):
+            self._set_status(f"未找到官方软件目录：{root}", "warn")
+            return
+        library = os.path.join(os.path.dirname(_app_data_dir()), "library")
+        try:
+            os.makedirs(library, exist_ok=True)
+        except Exception as exc:
+            self._set_status(f"创建素材库失败：{exc}", "error")
+            return
+        copied = 0
+        suffixes = (".gif", ".png", ".jpg", ".jpeg", ".webp", ".bmp")
+        for name in os.listdir(root):
+            if not name.lower().startswith("led"):
+                continue
+            directory = os.path.join(root, name)
+            if not os.path.isdir(directory):
+                continue
+            for current, _dirs, files in os.walk(directory):
+                for filename in files:
+                    if not filename.lower().endswith(suffixes):
+                        continue
+                    source = os.path.join(current, filename)
+                    target = os.path.join(library, os.path.basename(filename))
+                    if os.path.exists(target):
+                        continue
+                    try:
+                        shutil.copy2(source, target)
+                        copied += 1
+                    except OSError:
+                        continue
+        self._set_status(f"已导入 {copied} 个官方素材到 {library}", "ok" if copied else "warn")
+
+    # -- 图层插件 -------------------------------------------------------- #
+    def _load_plugins(self) -> None:
+        """启动时静默扫描插件目录并生成按钮。"""
+        if plugins_mod is None:
+            return
+        try:
+            plugins_mod.discover()
+        except Exception as exc:
+            _warn_once(f"启动时插件扫描失败：{exc}")
+            return
+        self._refresh_plugin_buttons()
+
+    def _on_reload_plugins(self) -> None:
+        if plugins_mod is None:
+            self._set_status("插件模块未就绪（hydrohud/plugins.py 缺失）", "warn")
+            return
+        try:
+            count = plugins_mod.discover()
+        except Exception as exc:
+            self._set_status(f"插件扫描失败：{exc}", "error")
+            return
+        self._refresh_plugin_buttons()
+        self._set_status(f"已加载 {count} 个图层插件（目录：{plugins_mod.plugin_dir()}）", "ok")
+
+    def _refresh_plugin_buttons(self) -> None:
+        if self._plugin_row is None:
+            return
+        for child in self._plugin_row.winfo_children():
+            child.destroy()
+        specs: dict = {}
+        if plugins_mod is not None:
+            try:
+                specs = dict(plugins_mod.registry().specs)
+            except Exception as exc:
+                _warn_once(f"读取插件列表失败：{exc}")
+        for index, (name, spec) in enumerate(specs.items()):
+            row_index, column_index = divmod(index, 3)
+            ttk.Button(
+                self._plugin_row,
+                text=f"＋ {getattr(spec, 'label', name)}",
+                style="Small.TButton",
+                command=lambda plugin_name=name: self._add_plugin_layer(plugin_name),
+            ).grid(row=row_index, column=column_index, sticky="ew", padx=2, pady=2)
+        if specs:
+            self._label(
+                self._plugin_row,
+                f"插件图层 {len(specs)} 个（可用「插件 → 重载」刷新）",
+                size=8,
+                color=MUTED,
+            ).grid(row=(len(specs) + 2) // 3, column=0, columnspan=3, sticky="w", padx=2)
+
+    def _add_plugin_layer(self, name: str) -> None:
+        layer = None
+        if plugins_mod is not None:
+            try:
+                layer = plugins_mod.registry().default_layer(name)
+            except Exception as exc:
+                _warn_once(f"读取插件默认图层失败：{exc}")
+        if not isinstance(layer, dict):
+            layer = {"type": name, "x": 0.5, "y": 0.5, "w": 0.4, "h": 0.2}
+        layer.setdefault("type", name)
+
+        def mutate(scene: dict) -> dict:
+            layers = scene.get("layers")
+            if not isinstance(layers, list):
+                layers = []
+            layers.append(layer)
+            scene["layers"] = layers
+            return scene
+
+        self._edit_scene(mutate, label=f"添加插件图层 {name}")
+        self._layer_index = max(0, len(self.scene.get("layers") or []) - 1)
+        self._refresh_layer_list()
+        self._set_status(f"已添加插件图层 {name}", "ok")
+
+    # -- 本地 HTTP API --------------------------------------------------- #
+    def _on_toggle_api(self) -> None:
+        if api_mod is None:
+            self._set_status("本地 API 模块未就绪（hydrohud/api.py 缺失）", "warn")
+            return
+        if self._api is not None:
+            self._stop_api()
+            return
+        try:
+            self._api_host = self._build_api_host()
+            self._api = api_mod.ApiServer(self._api_host, port=API_DEFAULT_PORT)
+            self._api.start()
+        except Exception as exc:
+            self._api = None
+            self._set_status(f"启动本地 API 失败：{exc}", "error")
+            return
+        self._set_status(
+            f"本地 API 已启动：http://127.0.0.1:{self._api.port}（token 见「高级 → 复制 API Token」）",
+            "ok",
+        )
+
+    def _stop_api(self) -> None:
+        if self._api is None:
+            return
+        try:
+            self._api.stop()
+        except Exception as exc:  # 停不下来也不能崩窗口
+            _warn_once(f"停止本地 API 失败：{exc}")
+        self._api = None
+        self._set_status("本地 API 已停止", "ok")
+
+    def _build_api_host(self) -> Any:
+        app = self
+
+        class _Host:
+            """把 API 请求封送回 Tk 主线程执行。"""
+
+            def status(self) -> dict:
+                return app._api_status_payload()
+
+            def get_scene(self) -> dict:
+                return app._snapshot_scene()
+
+            def apply_scene(self, scene: dict) -> str:
+                app.after(0, lambda: app._api_apply_scene(scene))
+                return "场景已排队应用"
+
+            def set_brightness(self, value: int) -> None:
+                def apply() -> None:
+                    percent = max(0, min(100, int(value)))
+                    app._bright_var.set(float(percent))
+                    app._on_brightness_move(str(percent))
+                    app._on_brightness_release()
+
+                app.after(0, apply)
+
+            def set_power(self, on: bool) -> None:
+                def apply() -> None:
+                    app._control_job(
+                        "power-on" if on else "power-off",
+                        lambda control: control.set_power(on),
+                        "已发送开屏指令" if on else "已发送关屏指令",
+                    )
+
+                app.after(0, apply)
+
+            def set_stream(self, on: bool) -> None:
+                if on:
+                    app.after(0, app._on_start_stream)
+                else:
+                    app.after(0, app._on_stop_stream)
+
+            def metrics(self) -> dict:
+                return app._metrics_payload()
+
+        return _Host()
+
+    def _actual_fps(self) -> float:
+        """按最近一轮推流的帧数与耗时估算实际帧率。"""
+        started = self._stream_started_at
+        if not started:
+            return 0.0
+        elapsed = max(1e-6, time.monotonic() - started)
+        return self._stream_frames / elapsed
+
+    def _api_status_payload(self) -> dict:
+        streaming = self._is_streaming()
+        measured_fps = self._actual_fps()
+        return {
+            "app": "HydroHUD",
+            "version": APP_VERSION,
+            "device": bool(self._detected),
+            "streaming": streaming,
+            "fps": round(measured_fps, 1) if streaming else 0.0,
+            "frames": self._stream_frames,
+            "brightness": int(float(self._bright_var.get() or 0)) if self._bright_var else 0,
+            "project": os.path.basename(self.project_path) if self.project_path else "",
+            "scene": str(self.scene.get("name") or ""),
+            "dirty": self._dirty,
+            "can_undo": bool(getattr(self._history, "can_undo", False)),
+            "can_redo": bool(getattr(self._history, "can_redo", False)),
+        }
+
+    def _metrics_payload(self) -> dict:
+        if sensors_mod is None:
+            return {}
+        try:
+            hub = sensors_mod.get_hub()
+            values = hub.sample()
+        except Exception as exc:
+            return {"error": str(exc)}
+        return {key: value for key, value in values.items()}
+
+    def _api_apply_scene(self, scene: dict) -> None:
+        if not isinstance(scene, dict):
+            return
+        try:
+            normalized = self._normalize(scene)
+        except Exception as exc:
+            self._set_status(f"API 场景非法：{exc}", "error")
+            return
+        self.project_path = None
+        self._current_preset_name = None
+        self._replace_scene(normalized, "API 已更新场景", label="API 更新场景")
+
+    def _on_copy_api_token(self) -> None:
+        token = ""
+        if self._api is not None:
+            try:
+                token = self._api.token
+            except Exception as exc:  # 运行中的服务器应当总能给出 token
+                _warn_once(f"读取 API token 失败：{exc}")
+        if not token and api_mod is not None:
+            try:
+                token = api_mod.ensure_token()
+            except Exception as exc:
+                _warn_once(f"生成 API token 失败：{exc}")
+        if not token:
+            self._set_status("还没有 API token（先启动一次本地 API）", "warn")
+            return
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(token)
+            self._set_status("API token 已复制到剪贴板", "ok")
+        except Exception as exc:
+            messagebox.showinfo("API Token", token, parent=self)
+            _warn_once(f"复制 token 失败，已改为弹窗显示：{exc}")
+
+    def _apply_layer_field(self, key: str, value: Any, coalesce_key: str | None = None) -> None:
         if self._syncing:
             return
         index = self._layer_index
+        if coalesce_key is None:
+            coalesce_key = f"field:{index}:{key}"
 
         def mutate(scene: dict) -> dict:
             layers = scene.get("layers")
@@ -2407,7 +3222,7 @@ class App(tk.Tk):
                 layers[index][key] = value
             return scene
 
-        self._edit_scene(mutate)
+        self._edit_scene(mutate, label=f"修改 {key}", coalesce_key=coalesce_key)
         self._update_layer_listitem(index)
 
     def _rebuild_layer_editor(self) -> None:
@@ -2433,6 +3248,13 @@ class App(tk.Tk):
             "chart": "折线图",
             "gauge": "仪表盘",
             "image": "图片",
+            "thermometer": "温度计",
+            "countdown": "倒计时",
+            "ticker": "滚动文字",
+            "sequence": "图片序列",
+            "qrcode": "二维码",
+            "weather": "天气",
+            "nowplaying": "正在播放",
         }
         self._label(
             self._layer_editor,
@@ -2507,9 +3329,12 @@ class App(tk.Tk):
                 side="right"
             )
             row += 1
-        elif kind in ("chart", "gauge"):
+        elif kind in ("chart", "gauge", "thermometer"):
             self._grid_label(grid, row, "监控指标")
-            metric_var = tk.StringVar(value=_metric_text(str(layer.get("metric") or "cpu")))
+            metric_default = "cpu_temp" if kind == "thermometer" else "cpu"
+            metric_var = tk.StringVar(
+                value=_metric_text(str(layer.get("metric") or metric_default))
+            )
             combo = ttk.Combobox(
                 grid,
                 textvariable=metric_var,
@@ -2537,7 +3362,7 @@ class App(tk.Tk):
                     grid, row, "高度", _safe_float(layer.get("h"), 0.22, 0.05, 1.0), "h"
                 )
                 row += 1
-            else:
+            elif kind == "gauge":
                 self._editor_scale_row(
                     grid,
                     row,
@@ -2553,6 +3378,41 @@ class App(tk.Tk):
                     _safe_float(layer.get("thickness"), 0.06, 0.005, 0.5),
                     "thickness",
                 )
+                row += 1
+            else:
+                self._editor_scale_row(
+                    grid, row, "宽度", _safe_float(layer.get("w"), 0.14, 0.02, 1.0), "w"
+                )
+                row += 1
+                self._editor_scale_row(
+                    grid, row, "高度", _safe_float(layer.get("h"), 0.62, 0.05, 1.0), "h"
+                )
+                row += 1
+                self._grid_label(grid, row, "显示")
+                holder = tk.Frame(grid, bg=CARD)
+                holder.grid(row=row, column=1, sticky="w", pady=2)
+                for key, label_text, default in (
+                    ("label", "名称", True),
+                    ("show_value", "数值", True),
+                    ("show_unit", "单位", True),
+                ):
+                    var = tk.BooleanVar(value=bool(layer.get(key, default)))
+                    tk.Checkbutton(
+                        holder,
+                        text=label_text,
+                        variable=var,
+                        bg=CARD,
+                        fg=TEXT,
+                        activebackground=CARD,
+                        activeforeground=TEXT,
+                        selectcolor=ENTRY_BG,
+                        highlightthickness=0,
+                        bd=0,
+                        font=(FONT_FAMILY, 9),
+                        command=lambda field=key, widget_var=var: self._apply_layer_field(
+                            field, bool(widget_var.get())
+                        ),
+                    ).pack(side="left", padx=(0, 12))
                 row += 1
         elif kind == "image":
             self._grid_label(grid, row, "图片文件")
@@ -2579,6 +3439,203 @@ class App(tk.Tk):
                 side="right"
             )
             row += 1
+        elif kind == "countdown":
+            for key, label_text, fallback in (
+                ("target", "目标时间", ""),
+                ("title", "标题", ""),
+                ("format", "格式", "{d} 天 {h}:{m}:{s}"),
+            ):
+                self._grid_label(grid, row, label_text)
+                var = tk.StringVar(value=str(layer.get(key) or fallback))
+                entry = ttk.Entry(grid, textvariable=var)
+                entry.grid(row=row, column=1, sticky="ew", pady=2)
+                var.trace_add(
+                    "write",
+                    lambda *_args, field=key, widget_var=var: self._apply_layer_field(
+                        field, widget_var.get()
+                    ),
+                )
+                row += 1
+        elif kind == "ticker":
+            self._grid_label(grid, row, "文字")
+            var = tk.StringVar(value=str(layer.get("text") or ""))
+            entry = ttk.Entry(grid, textvariable=var)
+            entry.grid(row=row, column=1, sticky="ew", pady=2)
+            var.trace_add(
+                "write",
+                lambda *_args, widget_var=var: self._apply_layer_field("text", widget_var.get()),
+            )
+            row += 1
+            self._grid_label(grid, row, "方向")
+            direction_var = tk.StringVar(value=str(layer.get("direction") or "left"))
+            ttk.Combobox(
+                grid,
+                textvariable=direction_var,
+                values=("left", "right"),
+                state="readonly",
+                width=8,
+            ).grid(row=row, column=1, sticky="w", pady=2)
+            direction_var.trace_add(
+                "write",
+                lambda *_args, widget_var=direction_var: self._apply_layer_field(
+                    "direction", widget_var.get()
+                ),
+            )
+            row += 1
+            self._editor_scale_row(
+                grid, row, "速度", _safe_float(layer.get("speed"), 60.0, 5.0, 600.0), "speed"
+            )
+            row += 1
+        elif kind == "sequence":
+            self._grid_label(grid, row, "图片序列")
+            holder = tk.Frame(grid, bg=CARD)
+            holder.grid(row=row, column=1, sticky="ew", pady=2)
+            count = len(layer.get("paths") or [])
+            self._label(
+                holder,
+                f"{count} 张图片" if count else "未选择",
+                size=8,
+                color=TEXT if count else MUTED,
+            ).pack(side="left", fill="x", expand=True)
+
+            def choose_sequence() -> None:
+                selected = filedialog.askopenfilenames(
+                    title="选择图片序列", filetypes=IMG_FILETYPES, parent=self
+                )
+                if selected:
+                    self._apply_layer_field("paths", list(selected))
+                    self._rebuild_layer_editor()
+
+            ttk.Button(holder, text="选择…", style="Small.TButton", command=choose_sequence).pack(
+                side="right"
+            )
+            row += 1
+            self._editor_scale_row(
+                grid, row, "帧率", _safe_float(layer.get("fps"), 8.0, 0.5, 60.0), "fps"
+            )
+            row += 1
+        elif kind == "qrcode":
+            self._grid_label(grid, row, "内容")
+            var = tk.StringVar(value=str(layer.get("data") or ""))
+            entry = ttk.Entry(grid, textvariable=var)
+            entry.grid(row=row, column=1, sticky="ew", pady=2)
+            var.trace_add(
+                "write",
+                lambda *_args, widget_var=var: self._apply_layer_field("data", widget_var.get()),
+            )
+            row += 1
+            self._grid_label(grid, row, "纠错级别")
+            error_var = tk.StringVar(value=str(layer.get("error") or "M"))
+            ttk.Combobox(
+                grid,
+                textvariable=error_var,
+                values=("L", "M", "Q", "H"),
+                state="readonly",
+                width=8,
+            ).grid(row=row, column=1, sticky="w", pady=2)
+            error_var.trace_add(
+                "write",
+                lambda *_args, widget_var=error_var: self._apply_layer_field(
+                    "error", widget_var.get()
+                ),
+            )
+            row += 1
+            self._editor_scale_row(
+                grid, row, "尺寸", _safe_float(layer.get("size"), 0.5, 0.05, 1.0), "size"
+            )
+            row += 1
+        elif kind == "weather":
+            self._grid_label(grid, row, "城市 / 坐标")
+            var = tk.StringVar(value=str(layer.get("place") or ""))
+            entry = ttk.Entry(grid, textvariable=var)
+            entry.grid(row=row, column=1, sticky="ew", pady=2)
+            var.trace_add(
+                "write",
+                lambda *_args, widget_var=var: self._apply_layer_field("place", widget_var.get()),
+            )
+            row += 1
+            self._grid_label(grid, row, "字段")
+            holder = tk.Frame(grid, bg=CARD)
+            holder.grid(row=row, column=1, sticky="w", pady=2)
+            for key, label_text in (
+                ("temp", "温度"),
+                ("feels", "体感"),
+                ("humidity", "湿度"),
+                ("wind", "风速"),
+                ("desc", "描述"),
+            ):
+                current = layer.get("fields") or ["temp", "desc"]
+                value_var = tk.BooleanVar(value=key in current)
+                tk.Checkbutton(
+                    holder,
+                    text=label_text,
+                    variable=value_var,
+                    bg=CARD,
+                    fg=TEXT,
+                    activebackground=CARD,
+                    activeforeground=TEXT,
+                    selectcolor=ENTRY_BG,
+                    highlightthickness=0,
+                    bd=0,
+                    font=(FONT_FAMILY, 9),
+                    command=lambda field=key, widget_var=value_var: self._apply_layer_field(
+                        "fields",
+                        [
+                            item
+                            for item in ("temp", "feels", "humidity", "wind", "desc")
+                            if (item == field and widget_var.get())
+                            or (item != field and item in (layer.get("fields") or []))
+                        ],
+                    ),
+                ).pack(side="left", padx=(0, 8))
+            row += 1
+        elif kind == "nowplaying":
+            self._grid_label(grid, row, "字段")
+            holder = tk.Frame(grid, bg=CARD)
+            holder.grid(row=row, column=1, sticky="w", pady=2)
+            for key, label_text in (("title", "标题"), ("artist", "艺术家"), ("album", "专辑")):
+                current = layer.get("fields") or ["title", "artist"]
+                value_var = tk.BooleanVar(value=key in current)
+                tk.Checkbutton(
+                    holder,
+                    text=label_text,
+                    variable=value_var,
+                    bg=CARD,
+                    fg=TEXT,
+                    activebackground=CARD,
+                    activeforeground=TEXT,
+                    selectcolor=ENTRY_BG,
+                    highlightthickness=0,
+                    bd=0,
+                    font=(FONT_FAMILY, 9),
+                    command=lambda field=key, widget_var=value_var: self._apply_layer_field(
+                        "fields",
+                        [
+                            item
+                            for item in ("title", "artist", "album")
+                            if (item == field and widget_var.get())
+                            or (item != field and item in (layer.get("fields") or []))
+                        ],
+                    ),
+                ).pack(side="left", padx=(0, 8))
+            row += 1
+            self._grid_label(grid, row, "封面")
+            cover_var = tk.BooleanVar(value=bool(layer.get("show_cover", True)))
+            tk.Checkbutton(
+                grid,
+                text="显示封面",
+                variable=cover_var,
+                bg=CARD,
+                fg=TEXT,
+                activebackground=CARD,
+                activeforeground=TEXT,
+                selectcolor=ENTRY_BG,
+                highlightthickness=0,
+                bd=0,
+                font=(FONT_FAMILY, 9),
+                command=lambda: self._apply_layer_field("show_cover", bool(cover_var.get())),
+            ).grid(row=row, column=1, sticky="w", pady=2)
+            row += 1
 
         if kind == "image":
             self._grid_label(grid, row, "缩放")
@@ -2603,7 +3660,7 @@ class App(tk.Tk):
             )
             scale.pack(side="left", fill="x", expand=True)
             row += 1
-        else:
+        elif kind not in ("qrcode", "sequence"):
             self._grid_label(grid, row, "字号")
             size_var = tk.StringVar(value=str(int(_safe_float(layer.get("size"), 48, 8, 400))))
             spinbox = tk.Spinbox(
@@ -2627,10 +3684,20 @@ class App(tk.Tk):
             size_var.trace_add("write", lambda *_args, var=size_var: self._apply_size_field(var))
             row += 1
 
-        self._editor_color_row(
-            grid, row, "颜色", _norm_color(layer.get("color"), "#FFFFFF"), "color"
-        )
-        row += 1
+        if kind == "qrcode":
+            self._editor_color_row(
+                grid, row, "前景色", _norm_color(layer.get("fg"), "#0B0F14"), "fg"
+            )
+            row += 1
+            self._editor_color_row(
+                grid, row, "背景色", _norm_color(layer.get("bg"), "#FFFFFF"), "bg"
+            )
+            row += 1
+        else:
+            self._editor_color_row(
+                grid, row, "颜色", _norm_color(layer.get("color"), "#FFFFFF"), "color"
+            )
+            row += 1
         if kind == "bars":
             self._editor_color_row(
                 grid, row, "第二颜色", _norm_color(layer.get("color2"), "#F472B6"), "color2"
@@ -2645,7 +3712,7 @@ class App(tk.Tk):
                 grid, row, "背景色", _norm_color(layer.get("bg"), "#0F172A"), "bg"
             )
             row += 1
-        elif kind == "gauge":
+        elif kind in ("gauge", "thermometer"):
             self._editor_color_row(
                 grid, row, "轨道色", _norm_color(layer.get("track"), "#1E293B"), "track"
             )
@@ -3326,6 +4393,12 @@ class App(tk.Tk):
         except Exception:
             pass
         try:
+            if self._api is not None:
+                self._api.stop()
+                self._api = None
+        except Exception:  # API 停不下来也不能阻止退出
+            pass
+        try:
             if self._stream_thread is not None and self._stream_thread.is_alive():
                 self._stream_stop.set()
                 self._stream_thread.join(2.5)
@@ -3366,6 +4439,7 @@ class App(tk.Tk):
         self._load_playlist()
         self._install_drop_target()
         self._refresh_autostart_var()
+        self._load_plugins()
 
     # ---- 界面状态记忆 ------------------------------------------------- #
     def _restore_state(self) -> None:

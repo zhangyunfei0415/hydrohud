@@ -129,3 +129,63 @@ def test_gif_frames_encodes_animation(tmp_path) -> None:
     assert len(encoded) == 2
     assert fps == pytest.approx(10.0)
     assert all(len(jpeg) <= device.MAX_FRAME_BYTES for jpeg in encoded)
+
+
+def test_flash_upload_announces_then_streams_blocks() -> None:
+    """0x0A 声明总长与目标，0x0B 逐块携带 12 字节头 + 数据。"""
+    control = device.Control()
+    sent: list[bytes] = []
+    control.write_report = lambda report: sent.append(report)  # type: ignore[method-assign]
+    control._handle = 1  # 让 send_command 的桩替身生效前不被 is_open 挡下
+
+    data = bytes(range(256)) * 100  # 25600 bytes -> 3 blocks of 10240/10240/5120
+    control.upload_file(data, target=device.FLASH_TARGET_STARTUP)
+
+    assert sent, "no reports were written"
+    announce = sent[0]
+    assert announce[0] == 0x00
+    assert announce[1] == device.CMD_FILE_ANNOUNCE
+    assert announce[2] == 1  # 单包
+    assert announce[4] == 0x80
+    assert announce[5:9] == (1).to_bytes(4, "little")
+    assert announce[9:13] == len(data).to_bytes(4, "little")
+
+    blocks = sent[1:]
+    total = sum(len(packet) - 5 for packet in blocks)  # 每包 436 字节载荷
+    assert all(len(packet) == device.CONTROL_REPORT_LEN for packet in blocks)
+    assert all(packet[1] == device.CMD_FILE_CHUNK for packet in blocks)
+    # 每块首个包的头：offset / length / pad / progress
+    firsts = [packet for packet in blocks if packet[5:9] in (b"\x00\x00\x00\x00",)]
+    assert firsts, "no block started at offset 0"
+    first = firsts[0]
+    assert int.from_bytes(first[5:9], "little") == 0
+    block_len = int.from_bytes(first[9:11], "little")
+    assert block_len == device.FLASH_BLOCK_SIZE
+    assert first[11:13] == b"\x00\x00"
+    assert first[13] == 40  # 10240 / 25600 = 40%
+    assert total >= len(data)
+
+
+def test_flash_upload_rejects_oversized_and_empty_payloads() -> None:
+    control = device.Control()
+    control.write_report = lambda report: None  # type: ignore[method-assign]
+    control._handle = 1
+    with pytest.raises(ValueError):
+        control.upload_file(b"")
+    with pytest.raises(ValueError):
+        control.upload_file(b"\x00" * (device.FLASH_MAX_BYTES + 1))
+
+
+def test_flash_block_header_is_little_endian() -> None:
+    assert device._pack_u32(0x01020304) == b"\x04\x03\x02\x01"
+    assert device._pack_u16(0x0102) == b"\x02\x01"
+    assert device.FLASH_HEADER_LEN == 12
+
+
+def test_describe_panel_matches_the_device_table() -> None:
+    spec = device.detected_spec()
+    if spec is None:
+        pytest.skip("panel not connected")
+    text = device.describe_panel()
+    assert spec.label in text
+    assert f"{spec.vendor_id:04X}:{spec.product_id:04X}" in text

@@ -41,13 +41,17 @@
 
 | 模块 | 能力 |
 | --- | --- |
-| **画面来源** | 纯色背景；图片（JPG/PNG/WebP/BMP）；GIF / 动态 WebP；视频（MP4/AVI/MKV/WebM，需 imageio-ffmpeg） |
+| **画面来源** | 纯色背景；图片（JPG/PNG/WebP/BMP）；GIF / 动态 WebP；视频（MP4/AVI/MKV/WebM，需 imageio-ffmpeg）；**屏幕捕获**（把虚拟桌面的任意区域按 5 fps 镜像到屏上） |
 | **系统状态**（v1.2） | 23 项指标：CPU / 内存占用、CPU 频率与温度、GPU 占用 / 温度 / 显存 / 功耗 / 风扇 / 频率、磁盘占用与读写速率、网络上下行、运行时间、风扇转速、核心数。GPU 走 NVML，CPU 温度可读 LibreHardwareMonitor / HWiNFO 共享内存，缺失时显示「—」 |
-| **可叠加图层** | 文字（含 `{cpu}` `{gpu_temp}` `{time}` 等模板变量）、时钟（时分秒 + 日期）、状态文字（任意指标一行显示）、进度条、**折线图**（指标历史曲线）、**环形仪表盘**、图片贴图 |
+| **可叠加图层** | **14 类**：文字（含 `{cpu}` `{gpu_temp}` `{time}` 等模板变量）、时钟、状态文字、进度条、折线图、环形仪表盘、图片贴图、**温度计**、**倒计时/纪念日**、**滚动文字**、**图片序列（帧动画）**、**二维码**、**天气**、**正在播放** |
+| **可视化编辑器**（v1.3） | 在预览画布上直接拖动 / 缩放图层：8 个手柄、1/8 网格与中心线吸附、相邻图层边缘吸附、Ctrl 多选整体移动、方向键微移；配合撤销 / 重做（`Ctrl+Z` / `Ctrl+Y`，拖动滑块合并为一步） |
 | **实时预览** | 480×480 所见即所得预览，动态内容 10–15 fps 刷新，显示当前单帧 JPEG 体积（超限标红） |
 | **推流** | 10 / 20 / 30 / 60 fps 可选，静态画面自动按 2 s 间隔重推（固件看门狗要求），支持停止与热更新（边改边播） |
-| **设备控制** | 亮度 0–100 滑块、开/关屏幕、方向设置、读取设备状态（旋转象限）、一键结束官方软件 |
-| **工程文件** | 画面保存为 `.hud.json`，可分享、可版本管理 |
+| **设备控制** | 亮度 0–100 滑块、开 / 关屏幕、方向设置、读取设备状态（旋转象限）、一键结束官方软件 |
+| **工程文件** | 画面保存为 `.hud.json`，可分享、可版本管理；**主题包 `.hudpack`** 把工程 + 引用的素材打成一个 zip，一键导出 / 导入 |
+| **插件**（v1.3） | 图层插件放在 `%APPDATA%\HydroHUD\plugins`，用十几行 Python 画任意内容，GUI 自动生成按钮；坏插件只记一条错误，不影响其它插件 |
+| **本地 API / CLI**（v1.3） | `127.0.0.1:4780` 的 HTTP 控制面（token 保护）：读状态、切场景、调亮度、开关屏、开始 / 停止推流、SSE 事件流；配套 `hudctl` 命令行，方便 Home Assistant / Stream Deck / 脚本调用 |
+| **官方素材导入**（v1.3） | 一键扫描 `C:\Program Files (x86)\TcomasSoftware\led*/` 里的官方 GIF / 图片，复制进自己的素材库（只读官方文件，不修改） |
 | **省心功能**（v1.1） | 系统托盘常驻、全局热键、工程轮播、拖放导入文件、界面状态记忆、开机自启、崩溃日志、休眠唤醒自动重连 |
 
 ## 快速开始
@@ -90,20 +94,34 @@ python -m hydrohud --autostream --project "D:\我的场景.hud.json"
 │  设备          │      预览 480×480     │  内容与编辑            │
 │  ─────────    │                      │  ─────────            │
 │  连接状态      │   ┌──────────────┐   │  预设场景列表          │
-│  亮度滑块      │   │              │   │  背景：纯色/图片/GIF/视频│
-│  开/关屏幕     │   │   实时画面    │   │  图层：＋文字 ＋时钟    │
-│  方向下拉      │   │              │   │       ＋状态 ＋进度条  │
-│  读取设备状态  │   └──────────────┘   │       ＋折线图 ＋仪表盘 │
-│               │  FPS · 帧体积  字节   │       ＋图片           │
+│  亮度滑块      │   │              │   │  背景：纯色/图片/GIF/  │
+│  开/关屏幕     │   │   实时画面    │   │        视频/屏幕捕获   │
+│  方向下拉      │   │              │   │  图层：14 类 + 插件按钮 │
+│  读取设备状态  │   └──────────────┘   │  ─────────            │
+│               │  FPS · 帧体积  字节   │  画布拖动 / 手柄缩放    │
 ├───────────────┴──────────────────────┴───────────────────────┤
 │  FPS [30 ▾]   [▶ 开始推送到屏幕]  [⏹ 停止]   状态：……          │
 └──────────────────────────────────────────────────────────────┘
 ```
 
 1. **左栏**先点「检测设备」，确认看到 `TCOMAS LG600`。亮度、开关屏按钮会立即作用到硬件。
-2. **右栏**挑一个预设，或自己搭：选背景 → 加图层 → 拖动位置滑块微调。
+2. **右栏**挑一个预设，或自己搭：选背景 → 加图层 → 在预览画布上直接拖动摆位（`Ctrl+E` 进 / 出画布编辑）。
 3. **底部**选 FPS，点「▶ 开始推送到屏幕」。改任何设置都会实时反映到屏幕。
 4. 「⏹ 停止」后屏幕大约 10 秒内会变黑（固件看门狗），这是正常现象；要长期显示就保持推流。想恢复官方画面，重新打开 TCOMAS 软件即可。
+
+## 编辑与创作（v1.3）
+
+| 功能 | 用法 |
+| --- | --- |
+| **拖动摆位** | 预览画布上直接拖图层；拖动时自动吸附到 1/8 网格、屏幕中心线、其它图层的边缘与中心（容差 6 px），命中时出现辅助线 |
+| **缩放图层** | 选中后拖 8 个手柄：矩形类改宽高，仪表盘改直径，二维码保持正方形，文字类只能移动（字号在右栏调） |
+| **多选 / 微调** | `Ctrl+单击` 加选，多选时按整体偏移；方向键微移 1 px，`Shift+方向键` 8 px |
+| **画布编辑开关** | `Ctrl+E` 进入 / 退出画布编辑模式（退出后画布只做预览） |
+| **撤销 / 重做** | `Ctrl+Z` / `Ctrl+Y`；拖滑块、拖图层的连续操作会合并成一步，不会刷出上百条历史 |
+| **14 类图层** | 右栏「图层」→ 「添加图层…」下拉选，字段说明见 [docs/LAYERS.md](docs/LAYERS.md) |
+| **主题包** | 「主题包 → 导出 / 导入主题包…」，`.hudpack` = 工程 + 引用素材的 zip，可直接发给别人 |
+| **官方素材** | 「主题包 → 导入官方素材到素材库」，扫描已装的 TCOMAS 软件里的 GIF / 图片 |
+| **插件** | 往 `%APPDATA%\HydroHUD\plugins` 丢一个 `.py`，点「插件 → 重载图层插件」，图层页签会出现对应按钮；写法见 [docs/AUTOMATION.md](docs/AUTOMATION.md) |
 
 ## 快捷键 · 托盘 · 轮播（v1.1）
 
@@ -121,8 +139,13 @@ python -m hydrohud --autostream --project "D:\我的场景.hud.json"
 
 ## 命令行 / 自动化
 
-GUI 之外还有两条路子（都不在本仓库内，属于同一块屏的其他实现）：
+GUI 之外有四条路子：
 
+- **`hudctl` 命令行**（v1.3，本仓库）：GUI 开着并启动本地 API 后，
+  `python -m hydrohud.hudctl status` / `scene 极简时钟` / `brightness 40` / `stream off`。
+  详见 [docs/AUTOMATION.md](docs/AUTOMATION.md)。
+- **本地 HTTP API**（v1.3，本仓库）：`127.0.0.1:4780`，token 在 `%APPDATA%\HydroHUD\api-token.txt`，
+  可接 Home Assistant / Stream Deck / 自己写的脚本。
 - 单文件命令行版 `lg600.py`（纯标准库 + Pillow）：`python lg600.py push photo.jpg --hold 0` 常驻显示一张图。
 - [liquidctl](https://github.com/liquidctl/liquidctl) 驱动：`liquidctl set lcd screen static photo.png --keepalive 0`，可和别的 AIO 设备统一管理。
 
@@ -195,9 +218,9 @@ powershell -ExecutionPolicy Bypass -File build.ps1 -Clean
 }
 ```
 
-`background.type` 可为 `solid` / `image` / `gif` / `video`（后三者带 `path` 与 `fit`：`crop` 裁剪填满、`fit` 留黑边、`stretch` 拉伸）。坐标 `x`/`y` 为 0–1 归一化，`0.5` 表示居中。
+`background.type` 可为 `solid` / `image` / `gif` / `video` / `capture`（图片类带 `path` 与 `fit`：`crop` 裁剪填满、`fit` 留黑边、`stretch` 拉伸；`capture` 额外带 `region` 与 `fps`）。坐标 `x`/`y` 为 0–1 归一化，`0.5` 表示居中。
 
-图层类型一览：
+图层类型一览（完整字段表见 [docs/LAYERS.md](docs/LAYERS.md)）：
 
 | type | 关键字段 | 说明 |
 | --- | --- | --- |
@@ -208,6 +231,13 @@ powershell -ExecutionPolicy Bypass -File build.ps1 -Clean
 | `chart` | `metric`、`w`、`h`、`color`、`color2`、`bg`、`grid`、`fill`、`label`、`points`、`smooth` | 历史折线图（`x`/`y` 为区域左上角） |
 | `gauge` | `metric`、`diameter`、`thickness`、`color`、`track`、`start_angle`、`sweep`、`show_unit` | 环形仪表（`x`/`y` 为圆心） |
 | `image` | `path`、`scale`、`opacity` | 贴图 |
+| `thermometer` | `metric`、`w`、`h`、`color`、`track`、`show_value`、`label` | 竖向温度计，适合 CPU / GPU 温度 |
+| `countdown` | `target`、`title`、`format`、`done_text` | 倒计时 / 纪念日，`target` 为 ISO 时间字符串 |
+| `ticker` | `text`、`speed`、`direction`、`band` | 滚动文字，`direction` 为 `left` / `right` |
+| `sequence` | `paths`（图片数组）、`fps`、`fit`、`loop` | 帧动画，给一组图片按 fps 循环 |
+| `qrcode` | `data`、`size`、`fg`、`bg`、`error` | 二维码，纯 Python 生成，支持 `{指标id}` 模板 |
+| `weather` | `place` 或 `lat`/`lon`、`fields`、`icon` | 天气（Open-Meteo，免 key，10 分钟缓存） |
+| `nowplaying` | `fields`、`show_cover`、`cover_size`、`scroll` | 正在播放（Windows SMTC，需 `winsdk`，未装则显示占位） |
 
 ## 技术要点
 
@@ -222,10 +252,23 @@ powershell -ExecutionPolicy Bypass -File build.ps1 -Clean
 ```
 HydroHUD/
 ├── hydrohud/
-│   ├── device.py     USB HID 传输 + JPEG 编码 + 报文分帧（无 GUI 依赖）
-│   ├── render.py     场景 → 480×480 图像（7 类图层、GIF/视频背景、缓存）
+│   ├── app.py        Tkinter 界面（14 类图层编辑器、画布拖动、托盘 / 热键 / 轮播接线）
+│   ├── render.py     场景 → 480×480 图像（14 类图层、5 类背景、缓存、插件分发）
+│   ├── device.py     USB HID 传输 + JPEG 编码 + 报文分帧 + 设备表查询（无 GUI 依赖）
+│   ├── devices.py    设备表（VID/PID、报文长度、分包预算、是否已验证）
+│   ├── transport.py  传输抽象 + FakeTransport（测试）+ Linux hidraw 实现
 │   ├── scenes.py     场景 schema、11 个预设、工程文件读写
+│   ├── editor.py     画布编辑器（命中测试 / 拖动 / 缩放 / 吸附，几何部分为纯函数）
+│   ├── history.py    撤销 / 重做栈（深拷贝快照、拖动合并、脏标记）
 │   ├── sensors.py    系统指标采集中心（23 项，NVML / 共享内存 / ctypes，含历史缓冲）
+│   ├── weather.py    天气（Open-Meteo，免 key，缓存 + 离线降级）
+│   ├── media.py      正在播放（Windows SMTC，winsdk 可选）
+│   ├── capture.py    屏幕捕获（ImageGrab 缩略到 480）
+│   ├── plugins.py    图层插件注册表（APPDATA\HydroHUD\plugins）
+│   ├── api.py        本地 HTTP 控制面（127.0.0.1:4780，token + SSE）
+│   ├── hudctl.py     API 的命令行客户端
+│   ├── themepack.py  .hudpack 主题包导入导出
+│   ├── qrmini.py     纯 Python 二维码编码器（无第三方依赖）
 │   ├── sysmon.py     CPU/内存采样（旧接口，ctypes，无第三方库）
 │   ├── settings.py   界面状态与偏好持久化（JSON 原子写）
 │   ├── autostart.py  开机自启（HKCU Run 注册表项）
@@ -233,15 +276,17 @@ HydroHUD/
 │   ├── hotkeys.py    全局热键（RegisterHotKey）
 │   ├── playlist.py   工程轮播列表
 │   ├── diagnostics.py 崩溃日志
-│   ├── app.py        Tkinter 界面
 │   └── __main__.py   python -m hydrohud 入口
-├── docs/PROTOCOL.md  屏幕 HID 协议逆向记录
+├── docs/PROTOCOL.md  屏幕 HID 协议逆向记录（含 flash 上传子协议）
+├── docs/LAYERS.md    14 类图层与背景的字段参考
+├── docs/AUTOMATION.md 本地 API / hudctl / 插件 / 主题包
 ├── ROADMAP.md        后续版本规划与待验证实验
-├── tests/            pytest 用例（184 项：渲染、图表/仪表、场景、传感器、模块、报文分帧）
-├── preview/          预设渲染预览图（contact-sheet.png 是总览）
-├── examples/         示例工程 .hud.json
+├── AGENTS.md         给编码 agent 的移植与扩展说明书
+├── tests/            pytest 用例（802 项，全部纯软件，无需硬件）
+├── preview/          预设 / 背景 / v1.3 新能力渲染预览图（contact-sheet.png 是总览）
+├── examples/         示例工程 .hud.json + 示例插件
 ├── assets/           图标、界面截图
-├── tools/            预览图 / 测试素材 / 真机自检脚本
+├── tools/            预览图 / 真机自检 / GUI 无人值守自检脚本
 ├── launcher.py       PyInstaller 入口
 ├── make_icon.py      生成图标
 ├── build.ps1         一键打包
@@ -255,13 +300,17 @@ HydroHUD/
 - CPU 温度 / CPU 功耗 / 风扇转速依赖第三方监控软件的共享内存（LHM / HWiNFO），没装就显示「—」。
 - 折线图历史只存在于内存（默认 120 个采样点，0.5 s 一个 ≈ 1 分钟），重启后重新累积。
 - 视频需要 ffmpeg：`pip install imageio imageio-ffmpeg`，打包版已内置。
+- 「正在播放」需要 `pip install winsdk`（可选依赖，不在 requirements.txt 里）；未安装时该图层显示占位文案，其余功能不受影响。
+- 「天气」需要联网（Open-Meteo，免 API key）；断网时用缓存，从未成功拉取过则显示占位。
+- 「屏幕捕获」背景是低帧率镜像（默认 5 fps，上限 30），不适合当高帧率视频用；抓的是整个虚拟桌面，多显示器请用 `region` 选区域。
 - 官方软件开着时无法连接设备，界面会提示退出官方软件。
+- 本地 API 默认只监听 `127.0.0.1`；token 等同本机任意程序改屏幕的权限，不要外传。
 
 ## 路线图
 
-未来规划（v1.1 顺手 ✅ → v1.2 内容 → v1.3 协议深挖 → v1.4 跨平台 → v2.0 平台化）见
-[ROADMAP.md](ROADMAP.md)，其中列了各版本的功能清单、工作量、需要先用真机验证的 6 个实验
-（E1/E5 已在真机做完：46 包画质上限成立，640×640 会让设备掉线；剩下 flash 上传换开机图等）。
+未来规划（v1.1 顺手 ✅ → v1.2 内容 ✅ → v1.3 编辑与平台化 → v1.4 跨平台 → v2.0 社区）见
+[ROADMAP.md](ROADMAP.md)，其中列了各版本的功能清单、工作量、需要先用真机验证的实验
+（E1/E5 已在真机做完：46 包画质上限成立，640×640 会让设备掉线；flash 上传换开机图的 E2 已实现代码、待真机验证）。
 
 ## 许可
 

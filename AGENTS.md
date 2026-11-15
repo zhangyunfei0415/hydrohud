@@ -41,16 +41,26 @@ HydroHUD is an open-source controller for the **TCOMAS LG600** AIO liquid cooler
 
 | Module | Owns | Never touches |
 | --- | --- | --- |
-| `device.py` | HID enumeration, 1025-byte framing, JPEG encoding, `Screen`, `Control`, vendor-process handling | Tk, scenes, sensors |
-| `render.py` | scene dict → `PIL.Image`; layer painters (text/clock/sysinfo/bars/chart/gauge/image); LRU caches | device, Tk |
+| `device.py` | HID enumeration, packet framing, JPEG encoding, `Screen`, `Control` (incl. flash upload), vendor-process handling, device-table lookup (`detected_spec`/`describe_panel`) | Tk, scenes, sensors |
+| `render.py` | scene dict → `PIL.Image`; layer painters (14 types), background painters (solid/image/gif/video/**capture**), LRU caches, plugin dispatch for unknown layer types | device, Tk |
 | `scenes.py` | schema defaults/validation (`normalize_scene`), 11 presets, `.hud.json` load/save | device, Tk |
 | `sensors.py` | 23 metrics, `SensorHub` (0.5 s throttle + 120-sample history), NVML / Win32 / LHM-shared-memory backends | Tk, device |
-| `app.py` | everything UI: layout, editor, stream loop with absolute-deadline pacing, tray/hotkeys/playlist wiring | protocol details |
+| `app.py` | everything UI: layout, editor, stream loop with absolute-deadline pacing, tray/hotkeys/playlist wiring, API `Host` adapter, history/canvas-editor glue | protocol details |
+| `history.py` | undo/redo stack (deep-copied snapshots, coalescing, dirty tracking) | Tk, device |
+| `editor.py` | canvas editor geometry: `layer_bounds`/`hit_test`/`snap_offset`/`drag_selection`/`resize_layer` as pure functions + a thin `tk.Frame` wrapper | app state, device |
+| `themepack.py` | `.hudpack` export/import (scene + referenced assets as zip) | rendering |
+| `plugins.py` | layer-plugin registry (`%APPDATA%\HydroHUD\plugins`), discovery isolation, `draw_layer` dispatch | Tk, device |
+| `api.py` | local HTTP control plane (`127.0.0.1:4780`, token auth), SSE `/events` | Tk (callers marshal to the UI thread) |
+| `hudctl.py` | CLI client for that API (argparse + urllib) | in-process state |
+| `qrmini.py` | pure-Python QR encoder (byte mode, v1–20, L/M/Q/H) — zero runtime deps | rendering |
+| `weather.py` `media.py` `capture.py` | data sources: Open-Meteo (cached, offline-tolerant) / Windows SMTC (optional `winsdk`) / screen grab (`ImageGrab`) | Tk, device |
+| `devices.py` | device table (`DeviceSpec`: VID/PID, report lengths, chunk sizes, `verified`) | I/O |
+| `transport.py` | `Transport` protocol, `FakeTransport` (tests), Linux `HidrawTransport` + sysfs enumeration | Windows HID |
 | `settings.py` `autostart.py` `tray.py` `hotkeys.py` `playlist.py` `diagnostics.py` | persistence, Run key, Shell_NotifyIconW, RegisterHotKey, rotation list, crash log | domain logic |
 
 **Data flow for a new layer type:** `scenes.py` (defaults + validation) → `render.py` (`_draw_*_layer`,
 `_render_layer` dispatch, `_DYNAMIC_TYPES`, cache signature) → `app.py` (`layer_label`, `_add_layer` defaults,
-`_rebuild_layer_editor` controls) → `tests/`.
+`_rebuild_layer_editor` controls) → `tests/`. Layer field reference lives in [docs/LAYERS.md](docs/LAYERS.md).
 
 ## 3. Protocol cheat sheet
 
@@ -75,7 +85,7 @@ offset 5   1020B payload        raw JPEG bytes; pad the last packet with 0x00
 | `0x12` | 0–100 | brightness |
 | `0x10` | 0=on, 1=off | panel power |
 | `0x11` | 0–3 | rotation setting (stored only — **does not** rotate the stream; rotate pixels in Pillow) |
-| `0x0A`/`0x0B` | — | flash upload (startup image) — **untested** |
+| `0x0A`/`0x0B` | target u32 + size u32, then 12-byte block headers | flash upload (startup/standby image) — implemented as `Control.upload_file()`, **not yet verified on hardware**; see `docs/PROTOCOL.md` §3.1 |
 | `0x18`/`0x1A`/`0x1E` | — | temperature display / content type / loop — **untested** |
 
 ## 4. Recipe: port HydroHUD to another USB screen
@@ -124,14 +134,17 @@ Then in `hydrohud/render.py`: write `_draw_thermometer_layer(draw, layer, values
 ## 6. Commands
 
 ```powershell
-C:\Python314\python.exe -m pytest tests -q          # 184 tests, all pure-software
+C:\Python314\python.exe -m pytest tests -q          # 802 tests, all pure-software
 C:\Python314\python.exe -m black --line-length 100 hydrohud tests tools
 C:\Python314\python.exe -m hydrohud                 # run from source
 C:\Python314\python.exe -m hydrohud --project examples\性能曲线.hud.json --autostream --smoke-shot out.png
 powershell -ExecutionPolicy Bypass -File build.ps1 -Clean   # → dist\HydroHUD.exe
 C:\Python314\python.exe tools\check_device.py       # real hardware self-check
-C:\Python314\python.exe tools\verify_v11.py         # real-device fps regression
+C:\Python314\python.exe tools\verify_v11.py         # real-device fps regression (v1.1 scene)
+C:\Python314\python.exe -X utf8 tools\verify_v13.py  # real-device v1.3 scene: static + capture rounds
+C:\Python314\python.exe -X utf8 tools\gui_check.py  # headless GUI integration sweep (38 checks)
 C:\Python314\python.exe -X utf8 tools\render_previews.py    # regenerate preview/ + contact sheet
+C:\Python314\python.exe -X utf8 -m hydrohud.hudctl status   # CLI client for the local API (GUI must be running)
 ```
 
 GUI changes are verified headlessly with `--smoke-shot <png>`: it renders for 1.2 s, saves the preview and the

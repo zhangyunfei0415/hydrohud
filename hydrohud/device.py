@@ -28,13 +28,21 @@ from __future__ import annotations
 
 import ctypes
 import io
+import struct
 import threading
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image
+
+try:  # 设备表是可选模块：缺失时退化为单型号常量
+    from . import devices as devices_mod
+    from .devices import DeviceSpec
+except Exception:  # pragma: no cover - 仅防御 import 期异常
+    devices_mod = None  # type: ignore[assignment]
+    DeviceSpec = None  # type: ignore[assignment,misc]
 
 VENDOR_ID = 0x1A2C
 PRODUCT_ID = 0x1520
@@ -62,6 +70,12 @@ CMD_POWER = 0x10
 CMD_ROTATE = 0x11
 CMD_BRIGHTNESS = 0x12
 CMD_QUERY = 0x81
+
+FLASH_BLOCK_SIZE = 10240  # the vendor reads 0x2800-byte blocks per iteration
+FLASH_MAX_BYTES = 0x980000  # 9.96 MB, the vendor's own size clamp
+FLASH_TARGET_STARTUP = 1  # 0x0A flag dword written by the startup-image path
+FLASH_TARGET_STANDBY = 0  # 0x0A flag dword written by the standby-image path
+FLASH_HEADER_LEN = 12  # per-block header: offset, length, pad, progress, padding
 
 
 # --------------------------------------------------------------------------- #
@@ -354,6 +368,46 @@ def enumerate_devices(vid: int = VENDOR_ID, pid: int = PRODUCT_ID) -> list[dict]
     ]
 
 
+def detected_spec() -> DeviceSpec | None:
+    """Return the `devices.DeviceSpec` of the connected panel, or `None`.
+
+    Several TCOMAS panels share the vendor id; this maps whatever is plugged in
+    to its device-table entry so the UI can show a label and a verified flag.
+    """
+    if devices_mod is None:
+        return None
+    try:
+        collections = enumerate_hid()
+    except OSError:
+        return None
+    for info in collections:
+        spec = devices_mod.match_hidinfo(
+            {
+                "vendor_id": info.vendor_id,
+                "product_id": info.product_id,
+                "path": info.path,
+                "interface_number": info.interface_index,
+            }
+        )
+        if spec is not None:
+            return spec
+    return None
+
+
+def describe_panel() -> str:
+    """One-line description of the connected panel, for logs and the info command."""
+    spec = detected_spec()
+    if spec is None:
+        return f"TCOMAS panel {VENDOR_ID:04X}:{PRODUCT_ID:04X} (not in the device table)"
+    try:
+        collections = enumerate_hid(spec.vendor_id, spec.product_id)
+    except OSError:
+        collections = []
+    parts = ", ".join(f"mi_{c.interface_index:02d} out={c.output_len}" for c in collections)
+    verified = "已验证" if spec.verified else "未实测"
+    return f"{spec.label} ({spec.vendor_id:04X}:{spec.product_id:04X}, {verified}) [{parts}]"
+
+
 def vendor_processes() -> list[tuple[int, str]]:
     """Return ``(pid, exe_name)`` for every running official TCOMAS process."""
     snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
@@ -511,6 +565,16 @@ def encode_jpeg(img: Image.Image, max_bytes: int = MAX_FRAME_BYTES, rotate: int 
     raise ValueError(
         f"cannot fit the frame into {max_bytes} bytes even at quality 5; use a simpler picture"
     )
+
+
+def _pack_u32(value: int) -> bytes:
+    """Little-endian unsigned 32-bit, as the vendor's flash header uses."""
+    return struct.pack("<I", value & 0xFFFFFFFF)
+
+
+def _pack_u16(value: int) -> bytes:
+    """Little-endian unsigned 16-bit, as the vendor's flash header uses."""
+    return struct.pack("<H", value & 0xFFFF)
 
 
 def build_packets(cmd: int, payload: bytes, chunk_size: int, report_len: int) -> list[bytes]:
@@ -778,6 +842,46 @@ class Control(_HidDevice):
     def set_power(self, on: bool) -> None:
         """Turn the panel on or off (this is its only blank command)."""
         self.send_command(CMD_POWER, bytes([0 if on else 1]))
+
+    def upload_file(
+        self,
+        data: bytes,
+        target: int = FLASH_TARGET_STARTUP,
+        progress: Callable[[float], None] | None = None,
+    ) -> None:
+        """Write `data` into the panel's flash using the vendor's 0x0A/0x0B protocol.
+
+        The panel stores boot/standby assets this way: `0x0A` announces the total
+        size and target with a 100 ms settle delay, then `0x0B` blocks carry a
+        12-byte header (absolute offset, block length, progress percent) followed
+        by up to 10240 bytes of file data, chunked into 436-byte payloads.
+
+        `target` is the vendor's flag dword: 1 for the startup image/animation
+        path, 0 for the standby image. `progress` is called with 0..1 progress.
+        """
+        if not data:
+            raise ValueError("nothing to upload")
+        if len(data) > FLASH_MAX_BYTES:
+            raise ValueError(
+                f"payload is {len(data)} bytes, the panel accepts at most "
+                f"{FLASH_MAX_BYTES} ({len(data) / FLASH_MAX_BYTES:.1f}x too large)"
+            )
+        announce = ctypes.create_string_buffer(8)
+        announce.raw = _pack_u32(target) + _pack_u32(len(data))
+        self.send_command(CMD_FILE_ANNOUNCE, announce.raw)
+        time.sleep(0.1)
+        offset = 0
+        while offset < len(data):
+            block = data[offset : offset + FLASH_BLOCK_SIZE]
+            percent = min(100, int((offset + len(block)) * 100 / len(data)))
+            header = (
+                _pack_u32(offset) + _pack_u16(len(block)) + _pack_u16(0) + bytes([percent, 0, 0, 0])
+            )
+            assert len(header) == FLASH_HEADER_LEN
+            self.send_command(CMD_FILE_CHUNK, header + block)
+            offset += len(block)
+            if progress is not None:
+                progress(min(1.0, offset / len(data)))
 
 
 # --------------------------------------------------------------------------- #

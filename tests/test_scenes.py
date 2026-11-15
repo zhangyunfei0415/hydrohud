@@ -74,7 +74,11 @@ def test_metric_ids_cover_the_documented_set() -> None:
 
 def test_layer_types_and_labels_agree() -> None:
     """LAYER_TYPE_LABELS 与 LAYER_TYPES 一一对应，且都是中文名。"""
-    assert scenes.LAYER_TYPES == ("text", "clock", "sysinfo", "bars", "chart", "gauge", "image")
+    # v1.2 的七类图层必须一直是 LAYER_TYPES 的子集；v1.3 起会继续追加新类型。
+    assert {"text", "clock", "sysinfo", "bars", "chart", "gauge", "image"} <= set(
+        scenes.LAYER_TYPES
+    )
+    assert len(scenes.LAYER_TYPES) == len(set(scenes.LAYER_TYPES))
     assert set(scenes.LAYER_TYPE_LABELS) == set(scenes.LAYER_TYPES)
     for label in scenes.LAYER_TYPE_LABELS.values():
         assert label and label != ""
@@ -242,3 +246,77 @@ def test_clone_scene_is_deep_copy() -> None:
     clone = scenes.clone_scene(scene)
     clone["layers"][0]["x"] = 0.01
     assert scene["layers"][0]["x"] != 0.01
+
+
+# --------------------------------------------------------------------------- #
+# 插件图层（v1.3）：已注册类型被保留，未知类型仍被丢弃
+# --------------------------------------------------------------------------- #
+def _register_probe_plugin(monkeypatch: pytest.MonkeyPatch, name: str = "probe") -> None:
+    """把名为 ``name`` 的假插件注册进进程级注册表。"""
+    from hydrohud import plugins
+
+    registry = plugins.PluginRegistry()
+    registry._register_spec(
+        name, name, "", {"color": "#FFFFFF"}, lambda image, layer, ctx: True, ""
+    )
+    monkeypatch.setattr(plugins, "_REGISTRY", registry)
+
+
+def test_registered_plugin_layer_is_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+    """已注册插件图层不被丢弃，且顺序与内置图层保持交错。"""
+    _register_probe_plugin(monkeypatch)
+    scene = scenes.normalize_scene(
+        {"layers": [{"type": "clock"}, {"type": "probe"}, {"type": "text", "text": "x"}]}
+    )
+    assert [layer["type"] for layer in scene["layers"]] == ["clock", "probe", "text"]
+
+
+def test_plugin_layer_keeps_custom_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    """插件自定义字段原样保留，位置/锚点仍被归一化。"""
+    _register_probe_plugin(monkeypatch)
+    scene = scenes.normalize_scene(
+        {"layers": [{"type": "probe", "x": 5, "y": -1, "anchor": "nope", "custom": [1, 2]}]}
+    )
+    layer = scene["layers"][0]
+    assert layer["type"] == "probe"
+    assert layer["x"] == 5.0
+    assert layer["y"] == -1.0
+    assert layer["anchor"] == "center"
+    assert layer["custom"] == [1, 2]
+
+
+def test_plugin_layer_drops_unserializable_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    """不可 JSON 序列化的字段（对象 / NaN）被丢弃，场景仍可保存。"""
+    _register_probe_plugin(monkeypatch)
+    scene = scenes.normalize_scene(
+        {
+            "layers": [
+                {"type": "probe", "obj": object(), "nan": float("nan"), "ok": {"a": 1}},
+            ]
+        }
+    )
+    layer = scene["layers"][0]
+    assert "obj" not in layer
+    assert "nan" not in layer
+    assert layer["ok"] == {"a": 1}
+    json.dumps(scene)  # 不抛即合格
+
+
+def test_unregistered_type_is_still_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """插件注册表里没有的类型仍然被丢弃（插件缺失时行为与 v1.2 一致）。"""
+    _register_probe_plugin(monkeypatch, "probe")
+    scene = scenes.normalize_scene({"layers": [{"type": "probe"}, {"type": "sausage"}]})
+    assert [layer["type"] for layer in scene["layers"]] == ["probe"]
+
+
+def test_plugin_layers_survive_project_roundtrip(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """工程保存/载入后插件图层与自定义字段仍在。"""
+    _register_probe_plugin(monkeypatch)
+    scene = scenes.normalize_scene(
+        {"name": "插件场景", "layers": [{"type": "probe", "label_text": "hello"}]}
+    )
+    path = os.path.join(str(tmp_path), "plugin.hud.json")
+    scenes.save_project(scene, path)
+    loaded = scenes.load_project(path)
+    assert loaded["layers"][0]["type"] == "probe"
+    assert loaded["layers"][0]["label_text"] == "hello"
