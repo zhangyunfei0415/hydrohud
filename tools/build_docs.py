@@ -138,11 +138,11 @@ def build(output: Path = OUTPUT, strict: bool = False) -> list[str]:
             shutil.copytree(source_dir, output / directory)
     if strict:
         for page in PAGES.values():
-            warnings.extend(_check_links((output / page).read_text(encoding="utf-8"), page))
+            warnings.extend(_check_links((output / page).read_text(encoding="utf-8"), page, output))
     return warnings
 
 
-def _check_links(text: str, page: str) -> list[str]:
+def _check_links(text: str, page: str, output: Path) -> list[str]:
     problems = []
     for match in _LINK_RE.finditer(text):
         target = match.group(2)
@@ -151,7 +151,7 @@ def _check_links(text: str, page: str) -> list[str]:
         path = target.partition("#")[0]
         if not path:
             continue
-        if not (OUTPUT / path).exists():
+        if not (output / path).exists():
             problems.append(f"{page}: link target does not exist: {target}")
     return problems
 
