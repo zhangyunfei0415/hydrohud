@@ -1,0 +1,2 @@
+# 文档站依赖（CI 的 docs job 用，本地跑法见 mkdocs.yml 顶部注释）
+mkdocs-material>=9.5

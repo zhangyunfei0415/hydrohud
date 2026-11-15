@@ -135,7 +135,7 @@ Then in `hydrohud/render.py`: write `_draw_thermometer_layer(draw, layer, values
 ## 6. Commands
 
 ```powershell
-C:\Python314\python.exe -m pytest tests -q          # 944 tests, all pure-software
+C:\Python314\python.exe -m pytest tests -q          # 960 tests, all pure-software
 C:\Python314\python.exe -m black --line-length 100 hydrohud tests tools
 C:\Python314\python.exe -m ruff check hydrohud tests tools       # pyproject.toml holds the shared config
 C:\Python314\python.exe -m hydrohud                 # run from source
@@ -147,6 +147,8 @@ C:\Python314\python.exe -X utf8 tools\verify_v13.py  # real-device v1.3 scene: s
 C:\Python314\python.exe -X utf8 tools\gui_check.py  # headless GUI integration sweep (40 checks)
 C:\Python314\python.exe -X utf8 tools\render_previews.py    # regenerate preview/ + contact sheet
 C:\Python314\python.exe -X utf8 -m hydrohud.hudctl status   # CLI client for the local API (GUI must be running)
+C:\Python314\python.exe -X utf8 tools\build_docs.py --strict  # → build\docs-site\docs (site source tree)
+C:\Python314\python.exe -X utf8 -m mkdocs build --strict      # → build\docs-site\site (needs requirements-docs.txt)
 ```
 
 GUI changes are verified headlessly with `--smoke-shot <png>`: it renders for 1.2 s, saves the preview and the

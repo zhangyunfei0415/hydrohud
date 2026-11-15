@@ -21,6 +21,8 @@
 | TCOMAS LG700 | `1A2C:151C` | 另一套 USB 实现 | ⬜ 未验证，欢迎贡献 |
 | 你的屏幕？ | — | — | 👉 见下方「给 agent 的提示词」 |
 
+**在线文档站**：<https://zhangyunfei0415.github.io/hydrohud/>（同一份内容的静态站，含搜索与目录）。
+
 协议笔记：[docs/PROTOCOL.md](docs/PROTOCOL.md)（报文格式、控制命令、逆向过程、踩过的坑）。同一块屏还有另外两条路子：单文件命令行版 `lg600.py` 与 [liquidctl](https://github.com/liquidctl/liquidctl) 驱动适配（后者可和别的 AIO 设备统一管理）。
 
 ## 给 agent 的提示词（让别人也能适配自己的屏幕）
@@ -305,21 +307,23 @@ HydroHUD/
 ├── packaging/linux/  udev 规则、安装脚本、桌面入口
 ├── ROADMAP.md        后续版本规划与待验证实验
 ├── AGENTS.md         给编码 agent 的移植与扩展说明书
-├── tests/            pytest 用例（944 项，全部纯软件，无需硬件）
+├── tests/            pytest 用例（960 项，全部纯软件，无需硬件）
 ├── preview/          预设 / 背景 / v1.3 新能力渲染预览图（contact-sheet.png 是总览）
 ├── examples/         示例工程 .hud.json + 示例插件 + Home Assistant 集成包
 ├── assets/           图标、界面截图
-├── tools/            预览图 / 真机自检 / GUI 无人值守自检脚本
+├── tools/            预览图 / 真机自检 / GUI 无人值守自检 / 文档站装配脚本
 ├── launcher.py       PyInstaller 入口
 ├── make_icon.py      生成图标
 ├── build.ps1         一键打包
 ├── pyproject.toml    black / ruff 共享配置
+├── mkdocs.yml        文档站配置（Material 主题）
+├── requirements-docs.txt  文档站依赖（mkdocs-material）
 └── requirements.txt
 ```
 
 ## 已知限制
 
-- **Windows 为完整支持平台**：推流、设备控制、托盘、热键只在 Windows 上验证过。Linux 的 hidraw 后端已经接通（`Screen` / `Control` 按平台分派），urev 规则、桌面入口与安装脚本见 [docs/LINUX.md](docs/LINUX.md)，但 **Linux 真机推流尚未回归**；macOS 未开始。
+- **Windows 为完整支持平台**：推流、设备控制、托盘、热键只在 Windows 上验证过。Linux 的 hidraw 后端已经接通（`Screen` / `Control` 按平台分派），udev 规则、桌面入口与安装脚本见 [docs/LINUX.md](docs/LINUX.md)，但 **Linux 真机推流尚未回归**；macOS 未开始。
 - 仅 LG600（PID 1520）经过真机验证。LG700（1A2C:151C）已登记设备表，协议推定与 LG600 相同但未实测（见 [docs/PROTOCOL.md](docs/PROTOCOL.md)）。
 - 单帧 46920 字节上限：质量 100 的照片（约 42–46 KB，正好吃满预算）能原样上屏；只有逐像素噪点这种病态素材才会被迫降质量。
 - CPU 温度 / CPU 功耗 / 风扇转速依赖第三方监控软件的共享内存（LHM / HWiNFO），没装就显示「—」。

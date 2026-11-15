@@ -1,0 +1,90 @@
+# 文档站配置。源目录由 `python tools/build_docs.py` 生成（把 README 与 docs/*.md
+# 复制进 build/docs-site/docs 并改写相对链接），然后运行：
+#
+#     python tools/build_docs.py
+#     python -m mkdocs build      # 产物在 build/docs-site/site
+#     python -m mkdocs serve      # 本地预览 http://127.0.0.1:8000
+#
+# 文档正文只写在仓库原处，这里不重复维护第二份。
+site_name: HydroHUD
+site_description: 开源 USB 小屏控制软件 —— 把水冷头 / 机箱副屏变成想显示什么就显示什么的显示器
+site_url: https://zhangyunfei0415.github.io/hydrohud/
+repo_url: https://github.com/zhangyunfei0415/hydrohud
+repo_name: zhangyunfei0415/hydrohud
+edit_uri: ""
+
+docs_dir: build/docs-site/docs
+site_dir: build/docs-site/site
+
+theme:
+  name: material
+  language: zh
+  logo: assets/app.png
+  favicon: assets/app.png
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: 切到深色
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: 切到浅色
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.top
+    - navigation.sections
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - toc.follow
+
+nav:
+  - 首页: index.md
+  - 图层参考: layers.md
+  - 自动化: automation.md
+  - 插件开发: plugins.md
+  - 协议笔记: protocol.md
+  - Linux: linux.md
+  - 路线图: roadmap.md
+  - 移植指南: agents.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - tables
+  - toc:
+      permalink: true
+      # GitHub 的锚点保留中文（#图层插件），默认的 python-markdown 会把非 ASCII
+      # 全部丢掉变成 #_1。pymdownx.slugs.slugify(case="lower") 与 GitHub 一致，
+      # 仓库原有内链不用改。
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+plugins:
+  - search:
+      lang: [zh, en]
+
+extra:
+  generator: false
+
+copyright: MIT License · HydroHUD
