@@ -1,13 +1,14 @@
 # Linux 支持（v1.4）
 
 HydroHUD 的协议实现分两层：`hydrohud/device.py` 负责帧格式、JPEG 编码和设备命令，
-`hydrohud/transport.py` 负责把一条条 output report 写进设备。目前**传输层的 Linux 实现已经落地**，
-`hydrohud/devices.py` 的跨型号设备表也已完成；但 `device.py` / `app.py` 打开设备时仍只走
-Windows 的 `hid.dll`，还没有切到 `HidrawTransport`。也就是说：
+`hydrohud/transport.py` 负责把一条条 output report 写进设备。**两层已经接通**：`Screen`
+和 `Control` 在 Linux 上打开的是 `/dev/hidrawN`，帧编码、命令下发、查询回复与 Windows
+走的是同一套代码，不存在第二份协议实现。
 
-- 已就位：设备表（型号 / PID / 报文长度 / 分包大小）、Linux hidraw 传输类、sysfs 枚举与解析测试。
-- 尚未就位：Linux 上的端到端推流。把 `Screen` / `Control` 的打开路径接到 `HidrawTransport`
-  是 v1.4 剩下的工作；在那之前 Linux 上可以启动界面、渲染预览，但画面到不了屏幕。
+- 已就位：设备表（型号 / PID / 报文长度 / 分包大小）、hidraw 传输类、sysfs 枚举、
+  `Screen` / `Control` 的 Linux 打开路径、udev 规则与桌面入口。
+- 未验证：真机上的端到端推流（仓库里没有任何 Linux 硬件测试，见文末「未验证项」）。
+
 
 ## 为什么 Linux 走 hidraw
 
@@ -28,8 +29,20 @@ Linux 的 HID 子系统为每个 HID collection 导出一个字符设备 `/dev/h
 | `Transport` | 协议：`path`、`is_open`、`open()`、`close()`、`write_report(data)`、`read_report(length, timeout=1.0)` |
 | `HidrawTransport(path, report_len)` | 打开 `/dev/hidrawN`；非 Linux 平台 `open()` 抛 `RuntimeError` |
 | `FakeTransport` | 内存队列，测试与抓包回放用 |
-| `enumerate_hidraw(vendor_id, product_id, sysfs_root=None)` | 扫 `<root>/class/hidraw/*/device/uevent`，按 `HID_ID` 过滤，从 `HID_PHYS` 的 `MI_XX` 取接口号；`root` 可用 `HYDROHUD_SYSFS_ROOT` 覆盖，测试据此指向临时目录 |
+| `enumerate_hidraw(vendor_id, product_id, sysfs_root=None)` | 扫 `<root>/class/hidraw/*/device/uevent`，按 `HID_ID` 过滤，从 `HID_PHYS` 的 `MI_XX`（缺失时读父级 USB 接口的 `bInterfaceNumber`）取接口号；`root` 可用 `HYDROHUD_SYSFS_ROOT` 覆盖，测试据此指向临时目录 |
 | `report_len_for(path)` | 尽力而为；hidraw 不暴露解析后的报表长度，所以返回 `None`，长度一律从设备表取 |
+
+`hydrohud/device.py` 里有平台分派：
+
+| 名称 | 用途 |
+| --- | --- |
+| `enumerate_collections(vid, pid)` | Windows 走 `hid.dll`（`enumerate_hid`，真实 report caps）；Linux 走 hidraw + sysfs |
+| `_HidDevice.backend` | `"hidraw"` 或 `"hid"`，日志与界面用 |
+| `_HidDevice.open()` | 按平台选 `CreateFileW` 或 `HidrawTransport.open()`；Linux 上的 `OSError` 改写为「装 udev 规则」的可执行提示 |
+| `_HidDevice.write_report()` / `read_report()` | 同一套报文，写到句柄或 hidraw 节点 |
+
+`Screen` / `Control` 的公开方法（`send_jpeg`、`keepalive`、`query`、`set_brightness`、
+`upload_file` …）在两端完全一样，调用方不需要判断平台。
 
 设备表 `hydrohud/devices.py` 目前有两项：
 
@@ -86,7 +99,9 @@ python3 -m venv .venv
 
 ## 已知限制（如实）
 
-- **还不能推流到屏幕**：见文首，`device.py` / `app.py` 尚未接 `HidrawTransport`。
+- **尚未在真机验证**：本仓库的 Linux 路径只有纯软件测试（替身传输类），没有在真实
+  `/dev/hidrawN` 上推过帧。打开设备、写报文、查询回复的代码与你 Windows 上跑的是同一份，
+  但第一次真机运行仍属未验证路径。
 - **托盘图标禁用**：`tray.available()` 依赖 `Shell_NotifyIconW`，Linux 上返回 `False`，托盘相关功能自动关闭。
 - **部分传感器指标不可用**：CPU 温度/功耗/风扇只认 LibreHardwareMonitor / HWiNFO 的共享内存，
   GPU 指标走 NVML（`nvml.dll`），这些后端都是 Windows 路径，Linux 下这些指标为 `None`。
@@ -102,7 +117,7 @@ python3 -m venv .venv
 
 以下都需要真机或真实桌面环境确认，仓库里没有任何 Linux 硬件测试：
 
-1. Linux 上真正的端到端推流（等 `Screen`/`Control` 接线完成后）。
+1. Linux 上真正的端到端推流（代码已接通，等待真机回归）。
 2. udev 规则在各发行版（有无 `uaccess`、`plugdev` 组是否存在）上的实际效果。
 3. LG700（`1a2c:151c`）在 Linux 下的 PID 与接口布局——设备表里的数值是按 LG600 推定的，未实测。
 4. Wayland 会话下的 Tk 截图与截屏图层。
@@ -118,4 +133,5 @@ python3 -m ruff check hydrohud tests tools      # 配置在 pyproject.toml
 
 协议细节写在 [docs/PROTOCOL.md](PROTOCOL.md)；新增面板请同时更新 `hydrohud/devices.py` 的设备表、
 `packaging/linux/` 下的 udev 规则和本文档。Linux 相关的解析测试在
-`tests/test_linux_packaging.py`，只读仓库文件，不依赖 Linux 运行时。
+`tests/test_linux_packaging.py`（只读仓库文件）与 `tests/test_device_linux.py`
+（替身传输类，验证 `Screen` / `Control` 的 Linux 打开路径）。

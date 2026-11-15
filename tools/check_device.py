@@ -1,11 +1,12 @@
-"""Quick hardware check for the LG600 panel (no GUI, prints Chinese results).
+"""Quick hardware check for the panel (no GUI, prints Chinese results).
 
 Usage::
 
     python tools/check_device.py            # 只读检查（枚举 + 查询设置）
     python tools/check_device.py --push 4   # 额外推 4 秒纯色测试图
 
-Run it with the official TCOMAS software closed.
+On Windows run it with the official TCOMAS software closed. On Linux install the
+udev rule from ``packaging/linux/`` first, otherwise opening the device fails.
 """
 
 from __future__ import annotations
@@ -22,27 +23,41 @@ from PIL import Image  # noqa: E402
 from hydrohud import device  # noqa: E402
 
 
+def _missing_panel_hint() -> str:
+    if sys.platform == "win32":
+        return "未找到 TCOMAS 水冷屏（1A2C:1520）。检查 USB 连接，或确认设备没被官方软件独占。"
+    return (
+        "未找到 TCOMAS 水冷屏（1A2C:1520）。检查 USB 连接，并确认已安装 "
+        "packaging/linux/ 里的 udev 规则（见 docs/LINUX.md）。"
+    )
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="LG600 屏幕硬件自检")
+    parser = argparse.ArgumentParser(description="水冷屏硬件自检")
     parser.add_argument("--push", type=float, default=0.0, help="推纯色测试图的秒数（0 = 不推）")
     args = parser.parse_args()
 
     collections = device.enumerate_devices()
     if not collections:
-        print("未找到 TCOMAS LG600（1A2C:1520）。检查 USB 连接，或确认设备没被官方软件独占。")
+        print(_missing_panel_hint())
         return 1
     for collection in collections:
         print(
             f"找到接口 {collection['interface']:<6} 角色 {collection['role']:<8} "
             f"输出报文 {collection['output_len']} 字节"
         )
+    spec = device.detected_spec()
+    if spec is not None:
+        print(f"设备表：{spec.label}（{spec.key}）· 已验证 {spec.verified}")
 
     print(f"官方软件在运行：{device.vendor_software_running()}")
 
     with device.Control() as control:
         reply = control.query()
-        quadrant = reply[5] if len(reply) > 5 else "?"
-        print(f"查询设置：收到 {len(reply)} 字节，旋转象限 = {quadrant}")
+        quadrant = device.control_reply_quadrant(reply)
+        print(
+            f"查询设置：收到 {len(reply)} 字节，旋转象限 = {quadrant if quadrant is not None else '?'}"
+        )
 
     if args.push > 0:
         jpeg = device.encode_jpeg(Image.new("RGB", (480, 480), (220, 30, 30)))

@@ -28,6 +28,7 @@ import os
 import queue
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -153,7 +154,11 @@ MAX_JPEG_BYTES = int(getattr(device_mod, "MAX_FRAME_BYTES", 46920)) if device_mo
 STATIC_REFRESH_SECONDS = 2.0
 PREVIEW_INTERVAL_MS = 60
 PREVIEW_STREAMING_INTERVAL_MS = 220
-RECONNECT_HINT = "提示：官方 TCOMAS 软件（DeviceDriver.exe）运行时设备被占用，请先退出官方软件。"
+RECONNECT_HINT = (
+    "提示：官方 TCOMAS 软件（DeviceDriver.exe）运行时设备被占用，请先退出官方软件。"
+    if sys.platform == "win32"
+    else "提示：Linux 上写入 /dev/hidraw* 需要 udev 规则，见 docs/LINUX.md。"
+)
 PLAYLIST_DEFAULT_INTERVAL = 30.0
 HOTKEY_TOGGLE_STREAM = "ctrl+alt+s"
 HOTKEY_NEXT_PROJECT = "ctrl+alt+n"
@@ -1424,7 +1429,15 @@ class App(tk.Tk):
         self._device_reply.pack(fill="x", pady=(6, 0))
 
         self._device_hint = self._label(
-            body, "官方软件占用时，先退出 DeviceDriver.exe", size=8, color=MUTED, wrap=224
+            body,
+            (
+                "官方软件占用时，先退出 DeviceDriver.exe"
+                if sys.platform == "win32"
+                else "写入 /dev/hidraw* 需要 udev 规则，见 docs/LINUX.md"
+            ),
+            size=8,
+            color=MUTED,
+            wrap=224,
         )
         self._device_hint.pack(fill="x", side="bottom", pady=(8, 0))
 
@@ -3103,7 +3116,7 @@ class App(tk.Tk):
     def _open_folder(self, folder: str, what: str) -> None:
         """用系统文件管理器打开目录；失败时把路径交给用户。"""
         try:
-            os.startfile(folder)  # noqa: S606 - 打开资源管理器是预期行为
+            _reveal_folder(folder)
         except Exception as exc:
             self._set_status(f"打开{what}失败：{exc}（路径：{folder}）", "warn")
             return
@@ -5274,18 +5287,30 @@ class App(tk.Tk):
             self._set_status(f"找不到日志目录：{exc}", "warn")
             return
         try:
-            os.startfile(folder)  # noqa: S606 - 打开资源管理器给用户看日志是预期行为
+            _reveal_folder(folder)
         except Exception as exc:
             self._set_status(f"打开日志目录失败：{exc}（路径：{folder}）", "warn")
 
 
+def _reveal_folder(folder: str) -> None:
+    """在系统文件管理器里打开一个目录（Windows / macOS / Linux 各一条命令）。"""
+    if sys.platform == "win32":
+        os.startfile(folder)  # noqa: S606 - 打开资源管理器是预期行为
+        return
+    opener = "open" if sys.platform == "darwin" else "xdg-open"
+    subprocess.Popen([opener, folder])  # noqa: S603,S607 - 目标只是系统文件管理器
+
+
 def _parse_control_reply(reply: bytes) -> tuple[str, int | None]:
-    """解析 0x81 查询回复（441 字节，buf[5]=旋转象限）。"""
+    """解析 0x81 查询回复（旋转象限按回复长度定位，不硬编码偏移）。
+
+    两种后端对 report id 的处理不同：Windows 的 hid.dll 读回的 441 字节里首字节
+    是 report id，而 hidapi 风格的读取会剥掉它剩 440 字节，偏移的换算交给
+    `device.control_reply_quadrant`，这里只负责拼界面文案。
+    """
     if not reply:
         return "空回复", None
-    quadrant: int | None = None
-    if len(reply) > 5:
-        quadrant = int(reply[5]) & 0xFF
+    quadrant = device_mod.control_reply_quadrant(reply) if device_mod else None
     head = " ".join(f"{byte:02X}" for byte in reply[:8])
     text = f"{len(reply)} 字节 · 象限 {quadrant if quadrant is not None else '?'} · {head}"
     return text, quadrant

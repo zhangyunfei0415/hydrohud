@@ -201,13 +201,15 @@ _HID_ID_PREFIX = "HID_ID="
 _MI_RE = re.compile(r"mi_([0-9a-f]{2})", re.IGNORECASE)
 
 
-def enumerate_hidraw(
-    vendor_id: int, product_id: int, sysfs_root: str | Path | None = None
-) -> list[HidrawInfo]:
-    """List the hidraw nodes of a panel's HID collections, filtered by USB ids.
+def list_hidraw(sysfs_root: str | Path | None = None) -> list[HidrawInfo]:
+    """List every hidraw node under sysfs, whatever its USB ids.
 
-    Scans ``<sysfs_root>/class/hidraw/*/device/uevent`` for ``HID_ID`` and
-    ``HID_PHYS``; the interface number comes from ``MI_XX`` in the physical path.
+    Scans ``<sysfs_root>/class/hidraw/*/device/uevent`` for ``HID_ID``. The
+    interface number comes from ``MI_XX`` in ``HID_PHYS`` when the kernel writes
+    it there, otherwise from the ``bInterfaceNumber`` of the parent USB interface
+    directory: composite panels expose both collections as separate interfaces,
+    and only the second spelling is guaranteed across kernels.
+
     `sysfs_root` defaults to the ``HYDROHUD_SYSFS_ROOT`` environment variable (so
     tests can point it at a temporary tree on any OS) and then to ``/sys``.
     """
@@ -224,9 +226,11 @@ def enumerate_hidraw(
         except OSError:
             continue
         ids = _parse_hid_id(uevent)
-        if ids is None or ids != (vendor_id, product_id):
+        if ids is None:
             continue
         interface = _parse_interface_number(uevent)
+        if interface is None:
+            interface = _read_interface_number(node)
         path = f"/dev/{node.name}"
         found.append(
             HidrawInfo(
@@ -238,6 +242,17 @@ def enumerate_hidraw(
             )
         )
     return found
+
+
+def enumerate_hidraw(
+    vendor_id: int, product_id: int, sysfs_root: str | Path | None = None
+) -> list[HidrawInfo]:
+    """List the hidraw nodes of a panel's HID collections, filtered by USB ids."""
+    return [
+        info
+        for info in list_hidraw(sysfs_root)
+        if (info.vendor_id, info.product_id) == (vendor_id, product_id)
+    ]
 
 
 def report_len_for(path: str) -> int | None:
@@ -288,3 +303,22 @@ def _parse_interface_number(uevent: str) -> int | None:
         if match:
             return int(match.group(1), 16)
     return None
+
+
+def _read_interface_number(node: Path) -> int | None:
+    """Read ``bInterfaceNumber`` from the USB interface above a hidraw node.
+
+    ``/sys/class/hidraw/hidrawN/device`` links to the HID device
+    (``.../1-3:1.1/0003:1A2C:1520.0001``); its parent is the USB interface
+    directory, which always carries ``bInterfaceNumber``. Kernels differ on
+    whether ``HID_PHYS`` includes the ``MI_XX`` suffix, so this is the fallback.
+    """
+    try:
+        resolved = (node / "device").resolve()
+        text = (resolved.parent / "bInterfaceNumber").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    try:
+        return int(text, 16)
+    except ValueError:
+        return None

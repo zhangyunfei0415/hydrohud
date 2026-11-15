@@ -182,6 +182,22 @@ def test_flash_block_header_is_little_endian() -> None:
     assert device.FLASH_HEADER_LEN == 12
 
 
+def test_control_reply_quadrant_tolerates_both_report_id_conventions() -> None:
+    # Windows hid.dll keeps the report id, so the quadrant lands at offset 5.
+    with_id = bytes([0x81, 0, 0, 0, 0, 2]) + bytes(435)
+    assert len(with_id) == 441
+    assert device.control_reply_quadrant(with_id) == 2
+    # hidapi-style reads strip it, shifting the same field to offset 4.
+    without_id = bytes([0x81, 0, 0, 0, 3]) + bytes(435)
+    assert len(without_id) == 440
+    assert device.control_reply_quadrant(without_id) == 3
+
+
+def test_control_reply_quadrant_returns_none_for_short_or_empty_replies() -> None:
+    assert device.control_reply_quadrant(b"") is None
+    assert device.control_reply_quadrant(b"\x81\x00") is None
+
+
 def test_describe_panel_matches_the_device_table() -> None:
     spec = device.detected_spec()
     if spec is None:

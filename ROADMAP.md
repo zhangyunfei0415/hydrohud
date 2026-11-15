@@ -10,7 +10,7 @@ v1.2.0 补上了「系统状态」这条主线（23 项指标、折线图/仪表
 
 | 能力 | 现状 |
 | --- | --- |
-| 传输 | 裸 Win32 HID（ctypes），图像 1025 字节报文 / 控制 441 字节报文，零第三方 HID 库；另有 `transport.py` 抽象 + `FakeTransport` 与 Linux hidraw 实现（未真机验证） |
+| 传输 | 裸 Win32 HID（ctypes），图像 1025 字节报文 / 控制 441 字节报文，零第三方 HID 库；`transport.py` 抽象 + `FakeTransport`，Linux 走 `/dev/hidrawN`（`Screen` / `Control` 按平台分派，未真机验证） |
 | 帧格式 | 每帧 1020 字节分包，预算 **46 包 = 46920 字节**（v1.0.0 沿用官方软件的 15 包习惯；E1 实测后放开），JPEG 自适应质量（100→5） |
 | 渲染 | **14 类图层**：文字（含指标模板）、时钟、状态文字、进度条、折线图、环形仪表盘、贴图、温度计、倒计时、滚动文字、图片序列、二维码、天气、正在播放；背景纯色 / 图片 / GIF / 视频 / **屏幕捕获**；插件图层兜底 |
 | 系统状态（v1.2） | 23 项指标：CPU/内存/GPU/磁盘/网络/温度/功耗/风扇/频率/运行时间；GPU 走 NVML，CPU 温度走 LHM/HWiNFO 共享内存；`SensorHub` 后台 0.5 s 采样 + 120 点历史，稳态 3–4 ms |
@@ -111,7 +111,7 @@ v1.2.0 补上了「系统状态」这条主线（23 项指标、折线图/仪表
 | 本地 API | `hydrohud/api.py`：`127.0.0.1:4780`，token（`X-HydroHUD-Token` 或 `?token=`），路由 `/status` `/scene` `/metrics` `/events`(SSE) + `POST /scene` `/brightness` `/power` `/stream`；`Host` Protocol 由 app.py 实现，所有回调封送到 Tk 主线程 | ✅ |
 | `hudctl` CLI | `hydrohud/hudctl.py`：status / scene / get-scene / brightness / power / stream / metrics / events，`--json` 输出 | ✅ |
 | 设备表 | `hydrohud/devices.py`：`DeviceSpec`（型号、VID/PID、两端接口报文长度、分包预算、是否已验证），`device.detected_spec()` / `describe_panel()` 走表查询；LG700 已在表中标注"未验证" | ✅ |
-| 传输抽象 + Linux 雏形 | `hydrohud/transport.py`：`Transport` 协议、`FakeTransport`（测试用）、`HidrawTransport` + sysfs 枚举，复用 `build_packets` | ✅ 代码就位，未在 Linux 真机验证 |
+| 传输抽象 + Linux 后端 | `hydrohud/transport.py`：`Transport` 协议、`FakeTransport`（测试用）、`HidrawTransport` + sysfs 枚举（`list_hidraw`，接口号回落读 `bInterfaceNumber`）；`device.py` 按平台分派，复用 `build_packets` | ✅ 代码就位，未在 Linux 真机验证 |
 | flash 上传（开机图） | `device.Control.upload_file()`：`0x0A` 声明 + `0x0B` 12 字节块头分块，含进度回调；协议见 `docs/PROTOCOL.md` §3.1 | ✅ 代码 + 桩测试，**真机未验证** |
 | 折叠式刷新 / 异步 HID 写 | — | ⬜ 未做：46 包已实测 30.0 fps / 0 迟到，收益不足 |
 | 未知命令扫盲（E3） | `0x18`/`0x1A`/`0x1E` | ⬜ 未测 |
@@ -123,7 +123,7 @@ v1.4.0 先落地了「平台化」里不依赖硬件的那一半：插件参数�
 
 | 项目 | 内容 | 工作量 | 状态 |
 | --- | --- | --- | --- |
-| Linux 支持 | `hydrohud/transport.py` 已有 `HidrawTransport` + sysfs 枚举 + `FakeTransport`（复用 `build_packets`）；udev 规则、桌面入口、安装脚本已进 `packaging/linux/`（见 `docs/LINUX.md`）；剩余：把 `device.Screen` / `Control` 接到 `HidrawTransport`、X11/Wayland 下 Tk 验证、真机回归 | 3 | 🟡 传输层与打包就位，`device.py` 未接线 |
+| Linux 支持 | `hydrohud/transport.py` 的 `HidrawTransport` + sysfs 枚举 + `FakeTransport`（复用 `build_packets`）；`device.Screen` / `Control` 已按平台分派到 `/dev/hidrawN`（`enumerate_collections` / `_HidDevice.backend`）；udev 规则、桌面入口、安装脚本在 `packaging/linux/`（见 `docs/LINUX.md`）；剩余：X11/Wayland 下 Tk 验证、真机推流回归 | 3 | 🟡 端到端已接线，待真机验证 |
 | LG700 适配 | `1A2C:151C` 已进设备表（`devices.py`，标 `verified=False`）；剩余：接硬件实测报文长度与命令差异 | 1 | 🟡 表就位，待硬件 |
 | 设备表 / 自动探测 | ✅ v1.3 完成：`devices.py` 表 + `device.detected_spec()` / `describe_panel()`，新屏幕加一行即可 | 1.5 | ✅ |
 | 多屏支持 | 同时驱动两块屏（不同工程），UI 做设备选择器 | 2 | ⬜ |

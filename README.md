@@ -73,7 +73,7 @@ C:\Python314\python.exe -m hydrohud
 
 Python 3.10+；运行时需要 Tkinter。**Windows 10/11 为完整支持**：协议基于 hid.dll，推流、设备控制、托盘、热键全部可用。
 
-Linux：底层的 hidraw 传输层（`hydrohud/transport.py`）与设备表已经就位，udev 规则、桌面入口和安装脚本在 [`packaging/linux/`](packaging/linux/)，装法与 hidraw 与 hidapi 的报文长度差异见 [docs/LINUX.md](docs/LINUX.md)。**端到端推流仍属 v1.4 进行中**，现在还只能跑测试与离线渲染，不会点亮屏幕。macOS 尚未开始。
+Linux：hidraw 传输层（`hydrohud/transport.py`）与设备表已经就位，`Screen` / `Control` 已接到 `/dev/hidrawN`，`pyproject.toml` 与全部测试在 Linux 上通过；udev 规则、桌面入口和安装脚本在 [`packaging/linux/`](packaging/linux/)，装法与 hidraw / hidapi 的报文长度差异见 [docs/LINUX.md](docs/LINUX.md)。**真机推流尚未回归**（仓库里没有 Linux 硬件测试），第一次点亮屏幕请按文档装好 udev 规则再试。macOS 尚未开始。
 
 ### 命令行参数（开机自启常驻）
 
@@ -138,6 +138,7 @@ python -m hydrohud --autostream --project "D:\我的场景.hud.json"
 | **WebSocket 事件流** | `ws://127.0.0.1:4780/ws`，RFC 6455 握手，每秒一条状态 JSON，`?limit=N` 发满即关；见 [docs/AUTOMATION.md](docs/AUTOMATION.md) |
 | **Home Assistant** | [examples/homeassistant/](examples/homeassistant/) 里是可直接用的 REST 传感器 + 服务定义 |
 | **Linux 打包资源** | `packaging/linux/` 有 udev 规则、安装脚本、`.desktop` 入口，装法见 [docs/LINUX.md](docs/LINUX.md) |
+| **Linux 推流接线** | `Screen` / `Control` 按平台选后端：Windows 走 `hid.dll`，Linux 走 `/dev/hidrawN`；帧编码与命令下发是同一份代码 |
 
 ## 快捷键 · 托盘 · 轮播（v1.1）
 
@@ -318,7 +319,7 @@ HydroHUD/
 
 ## 已知限制
 
-- **Windows 为完整支持平台**：推流、设备控制、托盘、热键只在 Windows 上验证过。Linux 已有 hidraw 传输层、udev 规则和安装脚本，端到端推流仍在 v1.4 开发中（见 [docs/LINUX.md](docs/LINUX.md)），macOS 未开始。
+- **Windows 为完整支持平台**：推流、设备控制、托盘、热键只在 Windows 上验证过。Linux 的 hidraw 后端已经接通（`Screen` / `Control` 按平台分派），urev 规则、桌面入口与安装脚本见 [docs/LINUX.md](docs/LINUX.md)，但 **Linux 真机推流尚未回归**；macOS 未开始。
 - 仅 LG600（PID 1520）经过真机验证。LG700（1A2C:151C）已登记设备表，协议推定与 LG600 相同但未实测（见 [docs/PROTOCOL.md](docs/PROTOCOL.md)）。
 - 单帧 46920 字节上限：质量 100 的照片（约 42–46 KB，正好吃满预算）能原样上屏；只有逐像素噪点这种病态素材才会被迫降质量。
 - CPU 温度 / CPU 功耗 / 风扇转速依赖第三方监控软件的共享内存（LHM / HWiNFO），没装就显示「—」。

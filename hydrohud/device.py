@@ -46,6 +46,11 @@ except Exception:  # pragma: no cover - 仅防御 import 期异常
     devices_mod = None  # type: ignore[assignment]
     DeviceSpec = None  # type: ignore[assignment,misc]
 
+try:  # 传输层是可选模块：Windows 上不需要，缺失时只用 hid.dll
+    from . import transport as transport_mod
+except Exception:  # pragma: no cover - 仅防御 import 期异常
+    transport_mod = None  # type: ignore[assignment]
+
 VENDOR_ID = 0x1A2C
 PRODUCT_ID = 0x1520
 DEVICE_NAME = "TCOMAS LG600"
@@ -94,6 +99,7 @@ OPEN_EXISTING = 3
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
 _IS_WINDOWS = sys.platform == "win32"
+_IS_LINUX = sys.platform.startswith("linux")
 
 
 class _UnavailableSymbol:
@@ -387,6 +393,51 @@ def enumerate_hid(vid: int | None = None, pid: int | None = None) -> list[HidInf
     return found
 
 
+def enumerate_collections(vid: int = VENDOR_ID, pid: int = PRODUCT_ID) -> list[HidInfo]:
+    """List the panel's HID collections through the platform backend.
+
+    Windows uses ``hid.dll`` (SetupAPI enumeration, real report caps). Linux uses
+    ``hidraw`` + sysfs; the report lengths there come from the device table, since
+    hidraw exposes only the raw report descriptor.
+    """
+    if _IS_LINUX:
+        return _linux_collections(vid, pid)
+    return enumerate_hid(vid, pid)
+
+
+def _linux_collections(vid: int, pid: int) -> list[HidInfo]:
+    """Describe a panel's hidraw nodes as `HidInfo`, using the device table."""
+    if transport_mod is None:
+        return []
+    spec = devices_mod.find_spec(vid, pid) if devices_mod is not None else None
+    image_len = getattr(spec, "image_report_len", REPORT_LEN)
+    control_len = getattr(spec, "control_report_len", CONTROL_REPORT_LEN)
+    image_interface = getattr(devices_mod, "IMAGE_INTERFACE", 1)
+    control_interface = getattr(devices_mod, "CONTROL_INTERFACE", 0)
+
+    found: list[HidInfo] = []
+    for node in transport_mod.enumerate_hidraw(vid, pid):
+        interface = node.interface_number
+        if interface == image_interface:
+            report_len = image_len
+        elif interface == control_interface:
+            report_len = control_len
+        else:
+            report_len = node.report_len or 0
+        found.append(
+            HidInfo(
+                path=node.path,
+                vendor_id=node.vendor_id,
+                product_id=node.product_id,
+                interface_index=interface if interface is not None else -1,
+                input_len=report_len,
+                output_len=report_len,
+                feature_len=0,
+            )
+        )
+    return found
+
+
 def enumerate_devices(vid: int = VENDOR_ID, pid: int = PRODUCT_ID) -> list[dict]:
     """Describe the panel's HID collections without opening them for I/O.
 
@@ -394,7 +445,7 @@ def enumerate_devices(vid: int = VENDOR_ID, pid: int = PRODUCT_ID) -> list[dict]
     device path). An empty list means the panel is not plugged in.
     """
     try:
-        collections = enumerate_hid(vid, pid)
+        collections = enumerate_collections(vid, pid)
     except OSError:
         return []
     return [
@@ -420,7 +471,7 @@ def detected_spec() -> DeviceSpec | None:
     if devices_mod is None:
         return None
     try:
-        collections = enumerate_hid()
+        collections = enumerate_collections()
     except OSError:
         return None
     for info in collections:
@@ -443,7 +494,7 @@ def describe_panel() -> str:
     if spec is None:
         return f"TCOMAS panel {VENDOR_ID:04X}:{PRODUCT_ID:04X} (not in the device table)"
     try:
-        collections = enumerate_hid(spec.vendor_id, spec.product_id)
+        collections = enumerate_collections(spec.vendor_id, spec.product_id)
     except OSError:
         collections = []
     parts = ", ".join(f"mi_{c.interface_index:02d} out={c.output_len}" for c in collections)
@@ -511,7 +562,7 @@ def vendor_software_running() -> bool:
 
 def find_image_interface(vid: int = VENDOR_ID, pid: int = PRODUCT_ID) -> HidInfo:
     """Return the HID collection that accepts 1025-byte output reports (MI_01)."""
-    collections = enumerate_hid(vid, pid)
+    collections = enumerate_collections(vid, pid)
     for info in collections:
         if info.output_len == REPORT_LEN:
             return info
@@ -523,7 +574,7 @@ def find_image_interface(vid: int = VENDOR_ID, pid: int = PRODUCT_ID) -> HidInfo
 
 def find_control_interface(vid: int = VENDOR_ID, pid: int = PRODUCT_ID) -> HidInfo:
     """Return the HID collection that accepts 441-byte output reports (MI_00)."""
-    for info in enumerate_hid(vid, pid):
+    for info in enumerate_collections(vid, pid):
         if info.output_len == CONTROL_REPORT_LEN:
             return info
     raise RuntimeError(f"no {CONTROL_REPORT_LEN}-byte control collection found")
@@ -681,28 +732,45 @@ def frame_reports(jpeg: bytes) -> list[bytes]:
 # Devices
 # --------------------------------------------------------------------------- #
 class _HidDevice:
-    """A HID collection opened read/write, with one fixed report format."""
+    """A HID collection opened read/write, with one fixed report format.
+
+    The framing above this class is platform independent; only the last step --
+    moving one whole report in or out -- differs. Windows goes through
+    ``hid.dll`` (`CreateFileW` + `WriteFile`/`ReadFile`), Linux goes through a
+    `hydrohud.transport.HidrawTransport` over ``/dev/hidrawN``. Both are the same
+    protocol, so `Screen` and `Control` work unchanged on both.
+    """
 
     report_len: int = 0
 
     def __init__(self, info: HidInfo | None = None) -> None:
         self.info = info
         self._handle: int | None = None
+        self._transport: Any = None
 
     def _default_info(self) -> HidInfo:
         raise NotImplementedError
 
     @property
+    def backend(self) -> str:
+        """``"hidraw"`` (Linux) or ``"hid"`` (Windows), for logs and the UI."""
+        return "hidraw" if _IS_LINUX else "hid"
+
+    @property
     def is_open(self) -> bool:
-        """Whether the underlying Windows handle is held."""
+        """Whether the underlying handle (Windows) or device node (Linux) is held."""
+        if self._transport is not None:
+            return bool(self._transport.is_open)
         return bool(self._handle)
 
     def open(self) -> _HidDevice:
         """Open the device; raises `RuntimeError` when it is missing or busy."""
-        if self._handle:
+        if self.is_open:
             return self
         if self.info is None:
             self.info = self._default_info()
+        if _IS_LINUX:
+            return self._open_hidraw()
         handle = kernel32.CreateFileW(
             self.info.path,
             GENERIC_READ | GENERIC_WRITE,
@@ -723,8 +791,29 @@ class _HidDevice:
         hid.HidD_SetNumInputBuffers(handle, 512)
         return self
 
+    def _open_hidraw(self) -> _HidDevice:
+        """Open the collection through a Linux hidraw device node."""
+        if transport_mod is None:  # pragma: no cover - only if the module is missing
+            raise RuntimeError(
+                "hidraw transport is unavailable: hydrohud/transport.py failed to import"
+            )
+        transport = transport_mod.HidrawTransport(self.info.path, self.report_len)
+        try:
+            transport.open()
+        except OSError as exc:
+            raise RuntimeError(
+                f"cannot open {self.info.path} ({exc}); install the udev rule from "
+                "packaging/linux/ so your user may write to the panel"
+            ) from exc
+        self._transport = transport
+        return self
+
     def close(self) -> None:
-        """Release the Windows handle; safe to call twice."""
+        """Release the handle or device node; safe to call twice."""
+        transport = self._transport
+        self._transport = None
+        if transport is not None:
+            transport.close()
         if self._handle:
             kernel32.CloseHandle(self._handle)
             self._handle = None
@@ -732,7 +821,7 @@ class _HidDevice:
     def reopen(self) -> _HidDevice:
         """Drop the cached handle and path, then re-enumerate and open.
 
-        The device path changes whenever Windows re-enumerates the panel (USB
+        The device path changes whenever the OS re-enumerates the panel (USB
         reset, sleep/wake, a firmware stall), so the cached `HidInfo` must not
         be reused across a reconnect.
         """
@@ -748,10 +837,14 @@ class _HidDevice:
 
     def write_report(self, report: bytes) -> None:
         """Write one complete output report."""
-        if self._handle is None:
+        if not self.is_open:
             raise RuntimeError(f"{type(self).__name__} is not open")
         if len(report) != self.report_len:
             raise ValueError(f"report must be {self.report_len} bytes, got {len(report)}")
+        transport = self._transport
+        if transport is not None:
+            transport.write_report(report)
+            return
         buf = ctypes.create_string_buffer(report, len(report))
         written = ctypes.c_uint32(0)
         if not kernel32.WriteFile(self._handle, buf, len(report), ctypes.byref(written), None):
@@ -759,8 +852,14 @@ class _HidDevice:
 
     def read_report(self, timeout: float = 1.0) -> bytes | None:
         """Read one input report, returning `None` if nothing arrives in `timeout`."""
-        if self._handle is None:
+        if not self.is_open:
             raise RuntimeError(f"{type(self).__name__} is not open")
+        transport = self._transport
+        if transport is not None:
+            try:
+                return transport.read_report(self.report_len, timeout)
+            except OSError:
+                return None
         handle = self._handle
         outcome: dict[str, object] = {}
 
@@ -927,6 +1026,22 @@ class Control(_HidDevice):
             offset += len(block)
             if progress is not None:
                 progress(min(1.0, offset / len(data)))
+
+
+def control_reply_quadrant(reply: bytes) -> int | None:
+    """Return the rotation quadrant carried by a 0x81 query reply, if present.
+
+    Two backends label the same reply differently: Windows' ``hid.dll`` returns
+    441 bytes including the leading report id, while hidapi-style reads strip the
+    id and return 440. The quadrant therefore sits at offset 5 or 4, so the
+    offset comes from the length instead of being hardcoded.
+    """
+    if not reply:
+        return None
+    offset = 4 if len(reply) == 440 else 5
+    if len(reply) <= offset:
+        return None
+    return int(reply[offset]) & 0xFF
 
 
 # --------------------------------------------------------------------------- #

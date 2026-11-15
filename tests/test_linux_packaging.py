@@ -131,5 +131,14 @@ def test_guide_documents_both_devices_and_the_frame_budget():
 
 def test_guide_states_the_current_limitation_honestly():
     text = _read(GUIDE)
-    assert "尚未就位" in text
     assert "未验证" in text
+    assert "真机" in text
+    # The guide must not claim hardware validation it does not have.
+    assert "已通过真机" not in text
+
+
+def test_guide_documents_the_device_level_wiring():
+    text = _read(GUIDE)
+    assert "enumerate_collections" in text
+    assert "Screen" in text and "Control" in text
+    assert "bInterfaceNumber" in text
