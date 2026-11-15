@@ -29,7 +29,15 @@ POST  ``/power``                  ``{"on": true|false}``
 POST  ``/stream``                 ``{"on": true|false}``
 GET   ``/metrics``                ``host.metrics()``
 GET   ``/events``                 SSE，每秒一行 ``data: {status}``，``?limit=N`` 发 N 条后关闭
+GET   ``/ws``                     WebSocket，握手后每秒一条 JSON 文本帧（服务端只发不收）
 ===== =========================== ================================================
+
+WebSocket 推送
+--------------
+``GET /ws`` 按 RFC 6455 握手（要求 ``Upgrade: websocket`` 与 ``Sec-WebSocket-Key``），
+返回 ``101`` 后每秒推一条 JSON 文本帧，内容与 SSE ``/events`` 的单条数据完全一致
+（两者共用 :meth:`_RequestHandler._event_payload`）。服务端只发不收，客户端发来的帧
+不解析；``?limit=N`` 发满 N 条后发关闭帧并断开。鉴权与其他路由相同。
 
 鉴权：请求头 ``X-HydroHUD-Token`` 或查询参数 ``?token=``，使用
 :func:`hmac.compare_digest` 常量时间比较；不匹配返回 401。``token=""`` 表示关闭鉴权
@@ -38,9 +46,12 @@ GET   ``/events``                 SSE，每秒一行 ``data: {status}``，``?lim
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import hmac
 import json
 import secrets
+import struct
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -51,18 +62,27 @@ from . import plugins, scenes
 
 __all__ = [
     "DEFAULT_PORT",
+    "EVENT_INTERVAL_SECONDS",
     "MAX_BODY_BYTES",
     "TOKEN_FILE_NAME",
+    "WS_PATH",
     "Host",
     "ApiServer",
-    "token_path",
+    "encode_close_frame",
+    "encode_text_frame",
     "ensure_token",
+    "handshake_accept",
+    "token_path",
 ]
 
 DEFAULT_PORT = 4780
 MAX_BODY_BYTES = 1024 * 1024
 TOKEN_FILE_NAME = "api-token.txt"
 EVENT_INTERVAL_SECONDS = 1.0
+WS_PATH = "/ws"
+
+#: RFC 6455 规定的握手 GUID（拼在 ``Sec-WebSocket-Key`` 后面做 SHA-1）。
+_WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
 @runtime_checkable
@@ -145,6 +165,7 @@ _ROUTES: dict[str, tuple[str, ...]] = {
     "/stream": ("POST",),
     "/metrics": ("GET",),
     "/events": ("GET",),
+    WS_PATH: ("GET",),
 }
 
 
@@ -199,6 +220,46 @@ def _coerce_bool(value: Any, field: str) -> bool:
     if not isinstance(value, bool):
         raise _ApiError(400, f"{field} 必须是 true 或 false")
     return value
+
+
+def _parse_limit(query: dict[str, list[str]]) -> int:
+    """解析 ``?limit=N``；缺省为 0（不限条数），非法值为 400。"""
+    raw = (query.get("limit") or ["0"])[0].strip()
+    try:
+        limit = int(raw or 0)
+    except ValueError:
+        raise _ApiError(400, "limit 必须是整数") from None
+    if limit < 0:
+        raise _ApiError(400, "limit 不能为负数")
+    return limit
+
+
+def handshake_accept(key: str) -> str:
+    """按 RFC 6455 §4.2.2 计算 ``Sec-WebSocket-Accept`` 响应值。
+
+    ``key`` 是客户端的 ``Sec-WebSocket-Key``；返回 base64(sha1(key + GUID))。
+    纯函数，便于在测试里对照 RFC 样例。
+    """
+    digest = hashlib.sha1((key.strip() + _WS_GUID).encode("utf-8")).digest()
+    return base64.b64encode(digest).decode("ascii")
+
+
+def encode_text_frame(payload: bytes) -> bytes:
+    """把 UTF-8 字节编码成一个完整文本帧（FIN=1，opcode=0x1，不加掩码）。
+
+    长度字段按 RFC 6455 分三档：<126 用 7 位、≤65535 用 16 位、其余用 64 位。
+    """
+    length = len(payload)
+    if length < 126:
+        return bytes((0x81, length)) + payload
+    if length <= 0xFFFF:
+        return bytes((0x81, 126)) + struct.pack(">H", length) + payload
+    return bytes((0x81, 127)) + struct.pack(">Q", length) + payload
+
+
+def encode_close_frame(code: int = 1000) -> bytes:
+    """编码一个带状态码的关闭帧（opcode=0x8，2 字节负载）。"""
+    return bytes((0x88, 2)) + struct.pack(">H", code)
 
 
 class _RequestHandler(BaseHTTPRequestHandler):
@@ -277,10 +338,16 @@ class _RequestHandler(BaseHTTPRequestHandler):
         try:
             split = urlsplit(self.path)
             path = split.path.rstrip("/") or "/"
+            if path == WS_PATH:
+                # WebSocket 是长连接协议，无论握手成功还是失败都不复用连接。
+                self.close_connection = True
             query = parse_qs(split.query)
             api._check_token(self, query)
             self._route(path)
         except _ApiError as error:
+            if error.status == 401:
+                # 鉴权失败后不保持连接：WebSocket 客户端与脚本都只等一次响应。
+                self.close_connection = True
             self._send_error(error)
         except (BrokenPipeError, ConnectionResetError):
             return
@@ -306,6 +373,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             ("POST", "/power"): self._handle_power,
             ("POST", "/stream"): self._handle_stream,
             ("GET", "/metrics"): self._handle_metrics,
+            ("GET", WS_PATH): self._handle_ws,
         }[(self.command, path)]
         handler()
 
@@ -347,18 +415,17 @@ class _RequestHandler(BaseHTTPRequestHandler):
     def _handle_metrics(self) -> None:
         self._send_json(self.server.api.host.metrics())  # type: ignore[attr-defined]
 
+    def _event_payload(self) -> dict[str, Any]:
+        """取一条事件数据；SSE 与 WebSocket 共用，单次采样失败时返回错误对象。"""
+        try:
+            return self.server.api.host.status()  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 - 单次采样失败不应断开整个流
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
     def _handle_events(self) -> None:
         """SSE 状态流：立刻发第一条，之后每 1 s 一条；``limit`` 到达即关闭。"""
         api: ApiServer = self.server.api  # type: ignore[attr-defined]
-        split = urlsplit(self.path)
-        query = parse_qs(split.query)
-        limit_raw = (query.get("limit") or ["0"])[0].strip()
-        try:
-            limit = int(limit_raw or 0)
-        except ValueError:
-            raise _ApiError(400, "limit 必须是整数") from None
-        if limit < 0:
-            raise _ApiError(400, "limit 不能为负数")
+        limit = _parse_limit(parse_qs(urlsplit(self.path).query))
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -370,11 +437,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
         sent = 0
         while not api._stop_event.is_set():
-            try:
-                status = api.host.status()
-            except Exception as exc:  # noqa: BLE001 - 单次采样失败不应断开整个流
-                status = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-            line = f"data: {json.dumps(status, ensure_ascii=False)}\n\n"
+            line = f"data: {json.dumps(self._event_payload(), ensure_ascii=False)}\n\n"
             try:
                 self.wfile.write(line.encode("utf-8"))
                 self.wfile.flush()
@@ -385,6 +448,45 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 return
             if api._stop_event.wait(EVENT_INTERVAL_SECONDS):
                 return
+
+    def _handle_ws(self) -> None:
+        """WebSocket 状态流：握手后立刻发第一条，之后每 1 s 一条 JSON 文本帧。
+
+        服务端只发不收（不解析客户端帧）；写失败说明客户端已断开，直接返回。
+        """
+        api: ApiServer = self.server.api  # type: ignore[attr-defined]
+        upgrade = (self.headers.get("Upgrade") or "").strip().lower()
+        key = (self.headers.get("Sec-WebSocket-Key") or "").strip()
+        if upgrade != "websocket":
+            raise _ApiError(400, "缺少 Upgrade: websocket")
+        if not key:
+            raise _ApiError(400, "缺少 Sec-WebSocket-Key")
+        limit = _parse_limit(parse_qs(urlsplit(self.path).query))
+
+        self.send_response(101)
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", handshake_accept(key))
+        self.end_headers()
+        self.close_connection = True
+
+        sent = 0
+        while not api._stop_event.is_set():
+            try:
+                self.wfile.write(encode_text_frame(_json_bytes(self._event_payload())))
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return
+            sent += 1
+            if limit and sent >= limit:
+                break
+            if api._stop_event.wait(EVENT_INTERVAL_SECONDS):
+                return
+        try:
+            self.wfile.write(encode_close_frame())
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
 
 class ApiServer:
@@ -427,7 +529,7 @@ class ApiServer:
         return self._httpd is not None
 
     # -- 生命周期 --------------------------------------------------------- #
-    def start(self) -> "ApiServer":
+    def start(self) -> ApiServer:
         """绑定端口并在 daemon 线程里开始服务；重复调用抛 :class:`RuntimeError`。"""
         if self._httpd is not None:
             raise RuntimeError("API 服务已经启动")
@@ -464,7 +566,7 @@ class ApiServer:
             if thread is not None and thread is not threading.current_thread():
                 thread.join(timeout=2.0)
 
-    def __enter__(self) -> "ApiServer":
+    def __enter__(self) -> ApiServer:
         return self.start()
 
     def __exit__(self, *exc_info: object) -> None:

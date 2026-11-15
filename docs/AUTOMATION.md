@@ -2,9 +2,9 @@
 
 HydroHUD 的日常操作在 GUI 里完成，但下面四条通道让**程序**也能控制它——不必打开窗口点按钮：Home Assistant 联动（开机切场景、夜间调暗）、Stream Deck 一键换画面、直播脚本切换、批量导入别人分享的预设。
 
-- 让外部程序读状态、切场景、调亮度、开关屏幕、启停推流 → [本地 HTTP API](#本地-http-api)
+- 让外部程序读状态、切场景、调亮度、开关屏幕、启停推流 → [本地 HTTP API](#本地-http-api)（含 HTTP 轮询、[SSE](#sse-状态流) 与 [WebSocket](#websocket-状态流) 三种事件订阅）
 - 在终端 / 批处理 / 计划任务里做同样的事 → [`hudctl` 命令行](#hudctl-命令行)
-- 增加 GUI 里没有的图层类型（自定义图表、特效、数据可视化）→ [图层插件](#图层插件)
+- 增加 GUI 里没有的图层类型（自定义图表、特效、数据可视化）→ [图层插件](#图层插件)，参数声明与隔离见 [PLUGINS.md](PLUGINS.md)
 - 把「场景 + 素材」打包分享给别人 → [主题包 `.hudpack`](#主题包-hudpack)
 
 ## 本地 HTTP API
@@ -52,11 +52,12 @@ server.stop()
 | POST | `/stream` | `{"on": true}` | `{"ok": true, "on": true}` | 开始 / 停止推流 |
 | GET | `/metrics` | — | 指标 dict | CPU / GPU / 内存等最新采样 |
 | GET | `/events` | — | `text/event-stream` | SSE 状态流，见下 |
+| GET | `/ws` | — | `101 Switching Protocols` | WebSocket 状态流，见下 |
 
 `POST /scene` 是**排队应用**：请求线程把场景交给 UI 线程后立刻返回 `"场景已排队应用"`，响应里的 `scene` 是校验后的规范场景。紧接着 `GET /scene` 可能还是旧场景，轮询留一两帧余量。`GET /status` 示例（字段随版本增减）：
 
 ```json
-{"app": "HydroHUD", "version": "1.3.0", "device": true, "streaming": true, "fps": 30.0,
+{"app": "HydroHUD", "version": "1.4.0", "device": true, "streaming": true, "fps": 30.0,
  "frames": 1024, "brightness": 80, "project": "夜间模式.hud.json", "scene": "夜间模式",
  "dirty": false, "can_undo": true, "can_redo": false}
 ```
@@ -105,6 +106,35 @@ curl -N -H "X-HydroHUD-Token: $TOKEN" "http://127.0.0.1:4780/events?limit=5"
 - 事件内容与 `GET /status` 相同；单次采样异常时该条为 `{"ok": false, "error": "..."}`，流不中断；没有 `id:` / `retry:` 字段，断线重连即重新开始。
 
 服务线程绝不直接碰 Tk。`Host` 的每个方法都可能从 HTTP 工作线程被调用，实现方必须把动作**封送回 UI 线程**（投递 `queue.Queue` + `root.after`，用 `threading.Event` 等结果）。仓库内参考实现是 `app.py` 的 `_build_api_host()`：`apply_scene` / `set_power` / `set_stream` 都走 `app.after(0, ...)`。在工作线程里直接调 tkinter 会随机崩溃或卡死界面。
+
+### WebSocket 状态流
+
+浏览器 / Home Assistant / 任何有 WS 客户端的语言都可以订阅同一条事件流：
+
+```text
+ws://127.0.0.1:4780/ws            # 一直推送
+ws://127.0.0.1:4780/ws?limit=10   # 推 10 条后服务端发关闭帧
+```
+
+- 握手走标准 RFC 6455：请求必须带 `Upgrade: websocket` 与 `Sec-WebSocket-Key`，服务端回 `101 Switching Protocols` 和正确的 `Sec-WebSocket-Accept`；缺头返回 `400`，鉴权失败返回 `401` 后断开（鉴权方式与 HTTP 完全一致：`X-HydroHUD-Token` 头或 `?token=`）。
+- 连上后**立刻**发第一条**文本帧**，之后每 `1.0` 秒（`EVENT_INTERVAL_SECONDS`）一条，payload 是与 `GET /status` 相同的 JSON。
+- 服务端**只发不收**，不解析客户端帧（含 ping/pong）；客户端断开（`BrokenPipe` / `ConnectionReset` / `OSError`）时该连接静默退出，不影响其它连接。
+- 帧实现是不加掩码的服务端帧，支持 7 位 / 16 位 / 64 位三种长度；关闭帧固定 `code=1000`。仓库里的 `encode_text_frame()` / `encode_close_frame()` / `handshake_accept()` 可单独复用。
+
+Python 客户端最省事的写法（`pip install websockets`）：
+
+```python
+import asyncio, json, websockets
+
+async def main():
+    async with websockets.connect("ws://127.0.0.1:4780/ws?limit=3") as ws:
+        async for message in ws:
+            print(json.loads(message)["streaming"])
+
+asyncio.run(main())
+```
+
+现成的 Home Assistant 集成（REST 传感器 + 6 个 `rest_command` + 中文摘要模板）在 [`examples/homeassistant/`](../examples/homeassistant/)。
 
 ## `hudctl` 命令行
 
@@ -200,7 +230,9 @@ PLUGIN = {"name": "crosshair", "label": "十字准星", "draw": draw,
           "defaults": {"x": 0.5, "y": 0.5, "size": 0.08, "color": "#38BDF8"}}
 ```
 
-仓库里还有更完整的示例 `examples/plugins/sparkline.py`（矩形内画流动正弦波，含参数容错），可直接复制到插件目录。
+仓库里还有更完整的示例 `examples/plugins/sparkline.py`（矩形内画流动正弦波，声明了 4 个可调参数），可直接复制到插件目录。参数声明（`params`）、隔离策略、权限字段和完整字段表见 [PLUGINS.md](PLUGINS.md)。
+
+**故障隔离**：`draw` 连续抛异常达到 `plugins.MAX_CONSECUTIVE_ERRORS`（3）次后，该插件进入隔离名单，之后不再调用，`PluginRegistry.errors` 里留一条 `连续绘制失败 3 次，已停止调用该插件（重载插件可恢复）`；任何一次成功绘制都会把计数清零。单次耗时超过 `plugins.DRAW_TIME_LIMIT`（0.25 秒）不会中断渲染，只记进 `PluginRegistry.slow`，供排查卡顿。
 
 **安全边界**：插件是**本机可信 Python 代码**，拥有完整进程权限，HydroHUD 不做沙箱、不限制 import；只安装自己信任的文件。单个插件导入失败或绘制抛异常不会影响其它插件和主程序：导入错误收集在 `PluginRegistry.errors`（中文原因，如 `bad.py: 导入失败：SyntaxError: ...`、`PLUGIN 必须是字典`、`插件重名：...`），绘制异常被 `plugins.draw_layer()` 静默吞掉；`draw` 返回假值、插件未注册、没有 `draw` 时都当作跳过。
 

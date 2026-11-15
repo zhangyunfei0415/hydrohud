@@ -1,0 +1,24 @@
+# Tooling configuration only — HydroHUD is not distributed as a Python package,
+# so there is deliberately no [build-system] or [project] table here.
+#
+# The exe is built by build.ps1 through PyInstaller; this file exists so that
+# black and ruff agree on the same rules locally and in CI.
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["build", "dist", "preview", "assets", "docs"]
+
+[tool.ruff.lint]
+# A small, high-signal set: real bugs (F), pycodestyle errors, import order,
+# pyupgrade, and bugbear. The full ruleset is too noisy for a project that
+# deliberately swallows exceptions in UI paths.
+select = ["E4", "E7", "E9", "F", "W", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test doubles deliberately do odd things (terminal-size lambdas, no-op stubs).
+"tests/*" = ["B"]

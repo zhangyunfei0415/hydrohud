@@ -291,3 +291,260 @@ def test_plugin_that_returns_false_does_not_draw(tmp_path: Path) -> None:
     image = Image.new("RGB", (480, 480), "#000000")
 
     assert registry.draw_layer(image, {"type": "skip"}, {}) is False
+
+
+PARAM_PLUGIN = """
+PLUGIN = {
+    "name": "paramd",
+    "params": [
+        {"key": "thickness", "label": "线宽", "type": "int", "default": 3, "min": 1, "max": 12},
+        {"key": "color", "label": "颜色", "type": "color", "default": "#38BDF8"},
+        {"key": "shape", "type": "choice", "default": "sine",
+         "options": [["sine", "正弦"], ["square", "方波"]]},
+    ],
+    "permissions": ["network"],
+}
+"""
+
+
+def test_normalize_params_accepts_every_declared_type() -> None:
+    specs = plugins.normalize_params(
+        [
+            {"key": "a", "type": "int", "default": 3, "min": 1, "max": 12},
+            {"key": "b", "type": "float", "default": 0.25},
+            {"key": "c", "type": "bool", "default": True},
+            {"key": "d", "type": "text", "default": "hi"},
+            {"key": "e", "type": "color", "default": "#abcdef"},
+            {"key": "f", "type": "choice", "options": [["x", "X"], ["y", "Y"]]},
+        ]
+    )
+
+    assert [spec.type for spec in specs] == list(plugins.PARAM_TYPES[:5]) + ["choice"]
+    assert specs[0].default == 3
+    assert specs[0].min == 1.0 and specs[0].max == 12.0
+    assert specs[3].key == "d" and specs[3].default == "hi"
+    assert specs[4].default == "#ABCDEF"
+    assert specs[5].default == "x"
+
+
+def test_normalize_params_drops_invalid_entries_and_duplicate_keys() -> None:
+    specs = plugins.normalize_params(
+        [
+            {"key": "keep", "type": "int", "default": 2},
+            {"key": "keep", "type": "int", "default": 9},
+            {"type": "int"},
+            {"key": "", "type": "int"},
+            {"key": "bad type", "type": "int"},
+            {"key": "nope", "type": "vector"},
+            {"key": "badcolor", "type": "color", "default": "red"},
+            {"key": "badchoice", "type": "choice", "options": [["only", "唯一"]]},
+            {"key": "notadict"},
+            "junk",
+        ]
+    )
+
+    assert [spec.key for spec in specs] == ["keep"]
+    assert specs[0].default == 2
+    assert plugins.normalize_params(None) == ()
+    assert plugins.normalize_params("junk") == ()
+
+
+def test_normalize_params_clamps_defaults_into_declared_bounds() -> None:
+    high, low = plugins.normalize_params(
+        [
+            {"key": "high", "type": "int", "default": 500, "min": 0, "max": 100},
+            {"key": "low", "type": "float", "default": -3.0, "min": 0.0, "max": 1.0},
+        ]
+    )
+
+    assert high.default == 100
+    assert low.default == 0.0
+
+
+def test_normalize_params_rejects_inverted_bounds() -> None:
+    assert plugins.normalize_params([{"key": "x", "type": "int", "min": 10, "max": 1}]) == ()
+
+
+def test_params_defaults_and_apply_params_fill_missing_keys() -> None:
+    specs = plugins.normalize_params(
+        [
+            {"key": "thickness", "type": "int", "default": 3, "min": 1, "max": 12},
+            {"key": "shape", "type": "choice", "options": [["sine", "正弦"], ["square", "方波"]]},
+        ]
+    )
+    spec = plugins.PluginSpec(name="p", label="p", params=specs)
+    layer = {"type": "p", "x": 0.1, "thickness": 99.6}
+
+    applied = plugins.apply_params(spec, layer)
+
+    assert applied["thickness"] == 12
+    assert applied["shape"] == "sine"
+    assert applied["x"] == 0.1
+    assert layer["thickness"] == 99.6
+    assert plugins.params_defaults(specs) == {"thickness": 3, "shape": "sine"}
+    assert plugins.apply_params(spec, None)["thickness"] == 3
+
+
+def test_coerce_param_falls_back_to_default_for_bad_values() -> None:
+    specs = plugins.normalize_params(
+        [
+            {"key": "count", "type": "int", "default": 5, "min": 0, "max": 10},
+            {"key": "ratio", "type": "float", "default": 0.5},
+            {"key": "color", "type": "color", "default": "#112233"},
+            {"key": "shape", "type": "choice", "options": [["a", "A"], ["b", "B"]]},
+            {"key": "flag", "type": "bool", "default": True},
+        ]
+    )
+
+    assert plugins.coerce_param(specs[0], "7.6") == 8
+    assert plugins.coerce_param(specs[0], "abc") == 5
+    assert plugins.coerce_param(specs[1], float("nan")) == 0.5
+    assert plugins.coerce_param(specs[1], "0.75") == 0.75
+    assert plugins.coerce_param(specs[2], "not-a-color") == "#112233"
+    assert plugins.coerce_param(specs[3], "zzz") == "a"
+    assert plugins.coerce_param(specs[4], "off") is False
+    assert plugins.coerce_param(specs[4], "YES") is True
+
+
+def test_plugin_dict_params_are_registered_and_merged_into_defaults(tmp_path: Path) -> None:
+    _write(tmp_path, "paramd.py", PARAM_PLUGIN)
+    registry = plugins.PluginRegistry(tmp_path)
+
+    assert registry.discover() == 1
+    spec = registry.get("paramd")
+    assert spec is not None
+    assert [param.key for param in spec.params] == ["thickness", "color", "shape"]
+    assert spec.permissions == ("network",)
+    assert spec.defaults["thickness"] == 3
+    assert registry.params_for("paramd") == spec.params
+    assert registry.params_for("missing") == ()
+    assert registry.default_layer("paramd")["color"] == "#38BDF8"
+
+
+def test_register_form_accepts_params_and_permissions(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "regform.py",
+        "def register(reg):\n"
+        '    reg.add("withparams", label="带参数",\n'
+        '            params=[{"key": "speed", "type": "int", "default": 4}],\n'
+        '            permissions="filesystem")\n',
+    )
+    registry = plugins.PluginRegistry(tmp_path)
+
+    assert registry.discover() == 1
+    spec = registry.get("withparams")
+    assert spec is not None
+    assert spec.label == "带参数"
+    assert [param.key for param in spec.params] == ["speed"]
+    assert spec.permissions == ("filesystem",)
+    assert spec.defaults == {"speed": 4}
+
+
+def test_failing_plugin_is_quarantined_after_limit(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "boom.py",
+        'def boom(image, layer, ctx):\n    raise RuntimeError("boom")\n\n\n'
+        'PLUGIN = {"name": "boom", "draw": boom}\n',
+    )
+    registry = plugins.PluginRegistry(tmp_path)
+    registry.discover()
+    image = Image.new("RGB", (480, 480), "#000000")
+    layer = {"type": "boom"}
+    limit = plugins.MAX_CONSECUTIVE_ERRORS
+    calls: list[int] = []
+
+    def counting(image, layer, ctx):
+        calls.append(1)
+        raise RuntimeError("boom")
+
+    registry._specs["boom"] = plugins.PluginSpec(name="boom", label="boom", draw=counting)
+    for _ in range(limit):
+        assert registry.draw_layer(image, layer, {}) is False
+
+    assert registry.is_quarantined("boom") is True
+    assert len(calls) == limit
+    assert registry.failures["boom"] == limit
+    assert any("连续绘制失败" in message for message in registry.errors)
+    assert registry.draw_layer(image, layer, {}) is False
+    assert len(calls) == limit
+
+
+def test_successful_draw_resets_failure_counter(tmp_path: Path) -> None:
+    state = {"fail": True}
+
+    def flaky(image, layer, ctx):
+        if state["fail"]:
+            raise RuntimeError("boom")
+        return True
+
+    registry = plugins.PluginRegistry(tmp_path)
+    registry._specs["flaky"] = plugins.PluginSpec(name="flaky", label="flaky", draw=flaky)
+    image = Image.new("RGB", (480, 480), "#000000")
+
+    assert registry.draw_layer(image, {"type": "flaky"}, {}) is False
+    assert registry.failures["flaky"] == 1
+    state["fail"] = False
+    assert registry.draw_layer(image, {"type": "flaky"}, {}) is True
+    assert registry.failures["flaky"] == 0
+    assert registry.is_quarantined("flaky") is False
+
+
+def test_slow_draw_is_recorded_without_interrupting(tmp_path: Path) -> None:
+    def slow(image, layer, ctx):
+        deadline = plugins.time.perf_counter() + plugins.DRAW_TIME_LIMIT + 0.02
+        while plugins.time.perf_counter() < deadline:
+            pass
+        return True
+
+    registry = plugins.PluginRegistry(tmp_path)
+    registry._specs["slow"] = plugins.PluginSpec(name="slow", label="slow", draw=slow)
+    image = Image.new("RGB", (480, 480), "#000000")
+
+    assert registry.draw_layer(image, {"type": "slow"}, {}) is True
+    assert registry.slow["slow"] > plugins.DRAW_TIME_LIMIT
+    assert registry.is_quarantined("slow") is False
+
+
+def test_discover_clears_quarantine_state(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "boom.py",
+        'def boom(image, layer, ctx):\n    raise RuntimeError("boom")\n\n\n'
+        'PLUGIN = {"name": "boom", "draw": boom}\n',
+    )
+    registry = plugins.PluginRegistry(tmp_path)
+    registry.discover()
+    image = Image.new("RGB", (480, 480), "#000000")
+    for _ in range(plugins.MAX_CONSECUTIVE_ERRORS):
+        registry.draw_layer(image, {"type": "boom"}, {})
+    assert registry.quarantined
+
+    registry.discover()
+
+    assert registry.quarantined == set()
+    assert registry.failures == {}
+    assert registry.errors == []
+
+
+def test_draw_layer_rejects_non_mapping_layer(tmp_path: Path) -> None:
+    registry = plugins.PluginRegistry(tmp_path)
+    registry._specs["ok"] = plugins.PluginSpec(
+        name="ok", label="ok", draw=lambda image, layer, ctx: True
+    )
+    image = Image.new("RGB", (480, 480), "#000000")
+
+    assert registry.draw_layer(image, None, {}) is False
+    assert registry.draw_layer(image, {"type": ""}, {}) is False
+    assert registry.draw_layer(image, {"type": "unknown"}, {}) is False
+
+
+def test_permissions_normalization_dedupes_and_lowercases() -> None:
+    assert plugins._normalize_permissions(["Network", "network", " filesystem "]) == (
+        "network",
+        "filesystem",
+    )
+    assert plugins._normalize_permissions("network") == ("network",)
+    assert plugins._normalize_permissions(None) == ()
+    assert plugins._normalize_permissions(42) == ()

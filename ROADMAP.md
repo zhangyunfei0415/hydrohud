@@ -1,12 +1,12 @@
 # HydroHUD 路线图
 
-v1.2.0 补上了「系统状态」这条主线（23 项指标、折线图/仪表盘），v1.3.0 补上了另一条更根本的主线：**「自己做画面」真的做得出来了**——可视化画布编辑器、撤销重做、7 类新图层、主题包、插件、本地 API。这份文档规划之后往哪儿长：哪些是顺手就能做的小改进，哪些要依赖协议层再做实验，哪些属于长期生态建设。
+v1.2.0 补上了「系统状态」这条主线（23 项指标、折线图/仪表盘），v1.3.0 补上了另一条更根本的主线：**「自己做画面」真的做得出来了**——可视化画布编辑器、撤销重做、7 类新图层、主题包、插件、本地 API。v1.4.0 继续往「平台化」推：插件参数声明与编辑器自动表单、插件隔离与权限声明、WebSocket 事件流与 Home Assistant 集成、社区预设库、Linux 打包资源、`ruff` 门禁。这份文档规划之后往哪儿长：哪些是顺手就能做的小改进，哪些要依赖协议层再做实验，哪些属于长期生态建设。
 
 工作量单位是**人日**（含测试与真机验证，AI 辅助开发的保守估计）。
 
 ---
 
-## 0. 基线：v1.3.0 有什么
+## 0. 基线：v1.4.0 有什么
 
 | 能力 | 现状 |
 | --- | --- |
@@ -19,10 +19,10 @@ v1.2.0 补上了「系统状态」这条主线（23 项指标、折线图/仪表
 | 推流 | 10/20/30/60 fps，绝对截止时刻调度，实测 **29.8–30.0 fps**；静态场景按 2 s 重推对抗看门狗；后台线程，窗口可最小化 |
 | 设备控制 | 亮度、开/关屏、读状态（441 字节回复）、方向设置（只存配置）、一键结束官方软件；设备表 `devices.py`（LG600 已验证 / LG700 待验证）；`Control.upload_file()` 实现 flash 上传（真机未验证） |
 | 工程 | `.hud.json` 工程文件；**11 个中文预设**；`.hudpack` 主题包（工程 + 素材 zip）；官方素材扫描导入 |
-| 自动化（v1.3） | 本地 HTTP API（`127.0.0.1:4780`，token + SSE）+ `hudctl` CLI；图层插件（`%APPDATA%\HydroHUD\plugins`） |
+| 自动化（v1.3） | 本地 HTTP API（`127.0.0.1:4780`，token + SSE `/events` + **WebSocket `/ws`**，附 `examples/homeassistant/`）+ `hudctl` CLI；图层插件（`%APPDATA%\HydroHUD\plugins`，**参数声明 + 自动表单 + 故障隔离**）；**社区预设库**（`presetslib.py`：远程 JSON 索引 + 离线缓存 + 一键安装） |
 | 常驻能力（v1.1） | 系统托盘、全局热键、工程轮播、拖放导入、界面状态记忆、开机自启开关、崩溃日志、休眠唤醒自动重连 |
-| 分发 | PyInstaller 单文件 exe（约 73 MB）；**802 项 pytest**；`tools/check_device.py` 硬件自检、`tools/verify_v11.py` / `verify_v13.py` 真机帧率回归、`tools/gui_check.py` 无人值守 GUI 自检（38 项） |
-| 协议文档 | 仓库内 `docs/PROTOCOL.md`、`docs/LAYERS.md`、`docs/AUTOMATION.md` |
+| 分发 | PyInstaller 单文件 exe（约 73 MB）；**928 项 pytest**；`tools/check_device.py` 硬件自检、`tools/verify_v11.py` / `verify_v13.py` 真机帧率回归、`tools/gui_check.py` 无人值守 GUI 自检（38 项） |
+| 协议文档 | 仓库内 `docs/PROTOCOL.md`、`docs/LAYERS.md`、`docs/AUTOMATION.md`、`docs/PLUGINS.md`、`docs/LINUX.md` |
 
 已知没做的：flash 上传的真机验证、`0x18`/`0x1A`/`0x1E` 三个设置命令、LG700 型号、Linux 真机验证、多屏、代码签名、国际化。
 
@@ -119,9 +119,11 @@ v1.2.0 补上了「系统状态」这条主线（23 项指标、折线图/仪表
 
 ### v1.4「跨平台与多型号」（约 10 人日）
 
+v1.4.0 先落地了「平台化」里不依赖硬件的那一半：插件参数声明 + 编辑器自动表单、插件故障隔离与 `permissions` 声明、WebSocket `/ws` 与 Home Assistant 集成包、社区预设库（`presetslib.py`）、Linux udev 规则与打包资源、`ruff` 与 CI lint 门禁。真正需要硬件的部分（Linux 端到端推流、LG700 实测、多屏、macOS）仍在下面表里。
+
 | 项目 | 内容 | 工作量 | 状态 |
 | --- | --- | --- | --- |
-| Linux 支持 | `hydrohud/transport.py` 已有 `HidrawTransport` + sysfs 枚举 + `FakeTransport`（复用 `build_packets`）；剩余：udev 规则、X11/Wayland 下 Tk 验证、真机回归 | 3 | 🟡 传输层就位，未真机验证 |
+| Linux 支持 | `hydrohud/transport.py` 已有 `HidrawTransport` + sysfs 枚举 + `FakeTransport`（复用 `build_packets`）；udev 规则、桌面入口、安装脚本已进 `packaging/linux/`（见 `docs/LINUX.md`）；剩余：把 `device.Screen` / `Control` 接到 `HidrawTransport`、X11/Wayland 下 Tk 验证、真机回归 | 3 | 🟡 传输层与打包就位，`device.py` 未接线 |
 | LG700 适配 | `1A2C:151C` 已进设备表（`devices.py`，标 `verified=False`）；剩余：接硬件实测报文长度与命令差异 | 1 | 🟡 表就位，待硬件 |
 | 设备表 / 自动探测 | ✅ v1.3 完成：`devices.py` 表 + `device.detected_spec()` / `describe_panel()`，新屏幕加一行即可 | 1.5 | ✅ |
 | 多屏支持 | 同时驱动两块屏（不同工程），UI 做设备选择器 | 2 | ⬜ |
@@ -129,13 +131,13 @@ v1.2.0 补上了「系统状态」这条主线（23 项指标、折线图/仪表
 
 ### v2.0「平台化」— 社区与生态（约 20 人日）
 
-| 项目 | 内容 | 工作量 |
+| 项目 | 内容 | 工作量 / 状态 |
 | --- | --- | --- |
-| ~~图层插件 API~~ | ✅ v1.3 已完成基础版（`plugins.py`：`PluginSpec` + `draw_layer` + 自动按钮）；剩余：JSON schema 声明参数、界面自动生成参数表单 | 2（剩余） |
-| 插件沙箱与验收 | 插件只在渲染线程调用、限时、异常隔离；安装前展示声明权限 | 2 |
-| ~~本地 API~~ | ✅ v1.3 已完成（`api.py` + `hudctl.py`）；剩余：Home Assistant 集成示例、WebSocket 推送 | 1（剩余） |
-| 社区预设库 | 远程 JSON 索引 + 一键下载（纯数据，不执行代码），带缩略图与评分字段 | 2 |
-| 自动发布流水线 | GitHub Actions：`pytest` + `black` + 打包 exe + 附件发布 + 变更日志 | 2 |
+| ~~图层插件 API~~ | ✅ v1.3 已完成基础版（`plugins.py`：`PluginSpec` + `draw_layer` + 自动按钮）；**v1.4 补完参数声明**：`plugins.ParamSpec` / `PARAM_TYPES` / `normalize_params` / `coerce_param` / `apply_params`，编辑器按声明自动生成控件，示例见 `examples/plugins/sparkline.py` | ✅ 完成 |
+| 插件沙箱与验收 | 已做：单次耗时软预算 `DRAW_TIME_LIMIT=0.25s`（记入 `slow`）、连续异常 `MAX_CONSECUTIVE_ERRORS=3` 次后隔离、`permissions` 声明字段；未做：真沙箱（子进程/限权）与安装前权限确认弹窗 | 2 / 🟡 隔离已做 |
+| ~~本地 API~~ | ✅ v1.3 已完成（`api.py` + `hudctl.py`）；**v1.4 补完**：WebSocket `/ws`（RFC 6455 握手、每秒文本帧、`?limit=N`）与 `examples/homeassistant/` 集成包 | ✅ 完成 |
+| 社区预设库 | ✅ 已做：`hydrohud/presetslib.py`（远程 JSON 索引 + 离线缓存 + 一键安装，只下载 `.hud.json` 不执行代码）+ 「社区 → 预设库」窗口；未做：缩略图与评分字段 | 2 / 🟡 基础版完成 |
+| 自动发布流水线 | ✅ 已做：`.github/workflows/ci.yml` 跑 `pytest`（3.10/3.12/3.13 × ubuntu/windows）+ `black` + `ruff` + `build.ps1` 打包；推 `v*` tag 时 `release` job 复用打包产物并自动建 Release、附 exe、生成变更日志 | ✅ 完成 |
 | 代码签名 | 减少 SmartScreen/杀软误报（需代码签名证书，用户自行决定是否购买） | 1 |
 | 国际化 | 界面文案抽离，英文 README 与英文 UI | 3 |
 | 文档站 | 协议文档 + 使用指南 + 插件开发指南，静态站发布 | 3 |
@@ -163,12 +165,12 @@ v1.2.0 补上了「系统状态」这条主线（23 项指标、折线图/仪表
 
 | 项 | 现状 | 计划 |
 | --- | --- | --- |
-| 测试 | **802 项**（渲染 14 类图层 / 图表仪表 / 场景 / 传感器 / 分帧 / 编码 / 撤销重做 / 画布几何 / 插件 / API / hudctl / 主题包 / 天气 / 捕捉 / 传输）；设备层用 `FakeTransport` + 桩 `write_report` 覆盖报文序列 | 加 CI 强制；真机路径只能靠 `tools/check_device.py` / `verify_v11.py` / `verify_v13.py` / `gui_check.py` |
+| 测试 | **928 项**（渲染 14 类图层 / 图表仪表 / 场景 / 传感器 / 分帧 / 编码 / 撤销重做 / 画布几何 / 插件参数与隔离 / 预设库 / API + WS / hudctl / 主题包 / 天气 / 捕捉 / 传输 / Linux 打包）；设备层用 `FakeTransport` + 桩 `write_report` 覆盖报文序列 | ✅ CI 已强制（ubuntu + windows × Py 3.10/3.12/3.13 + black + 打包）；真机路径只能靠 `tools/check_device.py` / `verify_v11.py` / `verify_v13.py` / `gui_check.py`（38 项无人值守 GUI 自检） |
 | exe 体积 | 72 MB（含 ffmpeg + numpy） | 提供 Lite 版（无视频，约 40 MB）；或把视频解码拆成可选插件 |
 | 首启动速度 | 单文件解包 1–2 s | 提供 one-folder 版本；或按需导入 imageio |
-| 类型与风格 | `black` 100 列已统一 | 加 `ruff`（未使用变量/未定义名）+ CI 强制 |
-| 仓库存档 | 多个提交，`.github/` 已放入工作区 | v1.3 起配 GitHub Actions |
-| 文档 | `README.md` + `AGENTS.md` + `docs/{PROTOCOL,LAYERS,AUTOMATION}.md` | 增加架构说明（线程模型、事件队列）；文档站 |
+| 类型与风格 | `black` 100 列 + `ruff`（`pyproject.toml` 共享配置，E4/E7/E9/F/W/I/UP/B 规则）全绿 | ✅ CI 已强制（`lint (black + ruff)` job） |
+| 仓库存档 | 多个提交，`.github/` 已放入工作区 | ✅ v1.3.0 起 CI 全绿（3×3 矩阵 + lint + 打包），release 手动发布 |
+| 文档 | `README.md` + `AGENTS.md` + `docs/{PROTOCOL,LAYERS,AUTOMATION,PLUGINS,LINUX}.md` | 增加架构说明（线程模型、事件队列）；文档站 |
 | 崩溃可观测 | 只有 `_warn_once` 到控制台 | 结构化日志 + 可选匿名统计（默认关闭） |
 
 ---

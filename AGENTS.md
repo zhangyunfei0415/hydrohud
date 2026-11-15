@@ -49,8 +49,9 @@ HydroHUD is an open-source controller for the **TCOMAS LG600** AIO liquid cooler
 | `history.py` | undo/redo stack (deep-copied snapshots, coalescing, dirty tracking) | Tk, device |
 | `editor.py` | canvas editor geometry: `layer_bounds`/`hit_test`/`snap_offset`/`drag_selection`/`resize_layer` as pure functions + a thin `tk.Frame` wrapper | app state, device |
 | `themepack.py` | `.hudpack` export/import (scene + referenced assets as zip) | rendering |
-| `plugins.py` | layer-plugin registry (`%APPDATA%\HydroHUD\plugins`), discovery isolation, `draw_layer` dispatch | Tk, device |
-| `api.py` | local HTTP control plane (`127.0.0.1:4780`, token auth), SSE `/events` | Tk (callers marshal to the UI thread) |
+| `plugins.py` | layer-plugin registry (`%APPDATA%\HydroHUD\plugins`), `ParamSpec` parameter schema + `normalize_params`/`coerce_param`, discovery isolation, per-plugin quarantine (`MAX_CONSECUTIVE_ERRORS`), `draw_layer` dispatch | Tk, device |
+| `presetslib.py` | community preset index (remote JSON + offline cache), `install_preset` via `scenes.save_project` — data only, never executes code | Tk, device |
+| `api.py` | local HTTP control plane (`127.0.0.1:4780`, token auth), SSE `/events`, WebSocket `/ws` | Tk (callers marshal to the UI thread) |
 | `hudctl.py` | CLI client for that API (argparse + urllib) | in-process state |
 | `qrmini.py` | pure-Python QR encoder (byte mode, v1–20, L/M/Q/H) — zero runtime deps | rendering |
 | `weather.py` `media.py` `capture.py` | data sources: Open-Meteo (cached, offline-tolerant) / Windows SMTC (optional `winsdk`) / screen grab (`ImageGrab`) | Tk, device |
@@ -134,8 +135,9 @@ Then in `hydrohud/render.py`: write `_draw_thermometer_layer(draw, layer, values
 ## 6. Commands
 
 ```powershell
-C:\Python314\python.exe -m pytest tests -q          # 802 tests, all pure-software
+C:\Python314\python.exe -m pytest tests -q          # 928 tests, all pure-software
 C:\Python314\python.exe -m black --line-length 100 hydrohud tests tools
+C:\Python314\python.exe -m ruff check hydrohud tests tools       # pyproject.toml holds the shared config
 C:\Python314\python.exe -m hydrohud                 # run from source
 C:\Python314\python.exe -m hydrohud --project examples\性能曲线.hud.json --autostream --smoke-shot out.png
 powershell -ExecutionPolicy Bypass -File build.ps1 -Clean   # → dist\HydroHUD.exe

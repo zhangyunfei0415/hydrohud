@@ -41,7 +41,8 @@ import sys
 import threading
 import time
 from collections import OrderedDict
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 from PIL import Image
 

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=HydroHUD
+Comment=TCOMAS LG600 水冷屏控制台
+Exec=hydrohud
+Terminal=false
+Categories=Utility;System;
+Icon=hydrohud

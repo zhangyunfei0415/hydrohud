@@ -18,10 +18,11 @@ import datetime as _dt
 import logging
 import math
 import os
-from typing import Any, Callable, Iterable, Sequence
-
 import tkinter as tk
-from PIL import Image, ImageDraw, ImageFont, ImageTk
+from collections.abc import Callable, Iterable, Sequence
+from typing import Any
+
+from PIL import Image, ImageDraw, ImageTk
 
 from . import render
 
@@ -863,7 +864,7 @@ class CanvasEditor(tk.Frame):
         self._pending_scene = scene if self._selected else None
 
     def _draw_handles(self, bounds: tuple[float, float, float, float]) -> None:
-        for name, (x, y) in handle_points(bounds).items():
+        for x, y in handle_points(bounds).values():
             display_x, display_y = x * self._zoom, y * self._zoom
             half = HANDLE_SIZE / 2.0
             self._canvas.create_rectangle(

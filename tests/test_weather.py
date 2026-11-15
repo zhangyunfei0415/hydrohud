@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import io
 import json
 import os
 import sys
@@ -53,7 +52,7 @@ class FakeResponse:
     def read(self) -> bytes:
         return self._raw
 
-    def __enter__(self) -> "FakeResponse":
+    def __enter__(self) -> FakeResponse:
         return self
 
     def __exit__(self, *args: object) -> bool:

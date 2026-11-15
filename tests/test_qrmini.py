@@ -194,14 +194,14 @@ def test_auto_mask_is_penalty_minimum():
     参考实现 ``qrcode`` 在选掩码时故意隐藏格式信息位，因此不能直接比较它选出的掩码；
     这里用它独立实现的 ``lost_point`` 对 8 个完整符号评分来验证最小罚分。
     """
-    qrcode = _require_reference()
+    _require_reference()
     from qrcode.util import lost_point
 
     cases = [
         (b"HELLO WORLD", "M"),
         (b"HydroHUD 480x480", "L"),
         (b"x" * 60, "Q"),
-        ("中文二维码测试".encode("utf-8"), "H"),
+        ("中文二维码测试".encode(), "H"),
     ]
     for data, level in cases:
         actual = qrmini.make(data, level)

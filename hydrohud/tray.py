@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import ctypes
 import logging
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 logger = logging.getLogger("hydrohud.tray")
 
@@ -320,7 +321,7 @@ class TrayIcon:
     # ------------------------------------------------------------------ #
     # 内部实现
     # ------------------------------------------------------------------ #
-    def _build_nid(self, nif_flags: int) -> "NOTIFYICONDATAW":
+    def _build_nid(self, nif_flags: int) -> NOTIFYICONDATAW:
         """按当前状态填一个 ``NOTIFYICONDATAW``。"""
         nid = NOTIFYICONDATAW()
         nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)

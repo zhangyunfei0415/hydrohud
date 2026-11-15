@@ -25,8 +25,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--shots", metavar="DIR", default=None, help="把每步截图写到该目录")
     args = parser.parse_args(argv)
 
-    import tkinter as tk
-
     from hydrohud import app as app_mod
     from hydrohud import scenes
 
@@ -107,6 +105,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # 8) 插件重载（本机可能没有任何插件）
     check("重载插件", root_app._on_reload_plugins)
+    check("插件参数表单", lambda: _add_param_plugin_layer(root_app))
+    check("社区预设库", lambda: _open_preset_library(root_app))
 
     # 9) 本地 API token（不起服务）
     check("生成 API token", lambda: _token_text())
@@ -123,6 +123,106 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{name:<{width}} {outcome}")
     print(f"\n{len(results) - failures} passed, {failures} failed of {len(results)} checks")
     return 1 if failures else 0
+
+
+def _open_preset_library(app) -> None:
+    """打开社区预设库窗口（离线时会回落缓存），确认列表控件与安装按钮存在。"""
+    import time
+    from unittest import mock
+
+    from hydrohud import presetslib
+
+    scene = {
+        "name": "自检社区预设",
+        "layers": [{"type": "text", "text": "自检", "x": 0.5, "y": 0.5}],
+    }
+    entries = [
+        {"name": "自检社区预设", "author": "gui_check", "scene": scene, "version": "1.0"},
+    ]
+    with mock.patch.object(presetslib, "index_or_cache", lambda *a, **k: (entries, False)):
+        app._on_open_preset_library()
+        dialog = app._preset_library
+        assert dialog is not None, "预设库窗口没有创建"
+        for _ in range(200):
+            app.update()
+            if _find_listbox_count(dialog) > 0:
+                break
+            time.sleep(0.01)
+        assert _find_listbox_count(dialog) == 1, "预设库列表没有填充条目"
+        dialog.destroy()
+        app._preset_library = None
+
+
+def _widget_text(widget) -> str:
+    """递归收集控件树里所有 Label 的文本，用于断言界面确实渲染了某段提示。"""
+    try:
+        own = str(widget.cget("text"))
+    except Exception:  # 不是带 text 选项的控件
+        own = ""
+    parts = [own]
+    for child in widget.winfo_children():
+        parts.append(_widget_text(child))
+    return " ".join(part for part in parts if part)
+
+
+def _find_listbox_count(widget) -> int:
+    """递归找对话框里的 Listbox，返回第一个的条目数。"""
+    import tkinter as tk
+
+    for child in widget.winfo_children():
+        if isinstance(child, tk.Listbox):
+            return int(child.size())
+        found = _find_listbox_count(child)
+        if found:
+            return found
+    return 0
+
+
+def _add_param_plugin_layer(app) -> None:
+    """写一个带 params 声明的临时插件，添加图层并确认编辑器生成了控件。"""
+    import tempfile
+
+    from hydrohud import plugins
+
+    spec_text = (
+        "PLUGIN = {\n"
+        '    "name": "gaugex",\n'
+        '    "label": "自检参数插件",\n'
+        '    "params": [\n'
+        '        {"key": "thickness", "label": "线宽", "type": "int", "default": 3,'
+        ' "min": 1, "max": 12},\n'
+        '        {"key": "ratio", "label": "比例", "type": "float", "default": 0.4},\n'
+        '        {"key": "accent", "label": "高亮色", "type": "color",'
+        ' "default": "#38BDF8"},\n'
+        '        {"key": "mode", "label": "模式", "type": "choice", "default": "sine",\n'
+        '         "options": [["sine", "正弦"], ["square", "方波"]]},\n'
+        '        {"key": "enabled", "label": "启用", "type": "bool", "default": True},\n'
+        '        {"key": "note", "label": "备注", "type": "text", "default": "hello"},\n'
+        "    ],\n"
+        '    "permissions": ["network"],\n'
+        "}\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        Path(tmp, "gaugex.py").write_text(spec_text, encoding="utf-8")
+        registry = plugins.registry()
+        original_dir = registry.plugin_dir
+        registry.plugin_dir = Path(tmp)
+        try:
+            assert registry.discover() >= 1, "临时插件没有注册成功"
+            app._refresh_plugin_buttons()
+            app._add_plugin_layer("gaugex")
+            assert app.scene["layers"][-1]["type"] == "gaugex"
+            app._layer_index = len(app.scene["layers"]) - 1
+            app._rebuild_layer_editor()
+            assert app._layer_editor.winfo_children(), "插件图层编辑器为空"
+            layer = app._selected_layer()
+            assert layer is not None and layer.get("thickness") == 3
+            assert "网络访问" in _widget_text(app._layer_editor), "插件权限声明没有显示"
+            app._show_preview_image(_render_current(app))
+        finally:
+            registry.plugin_dir = original_dir
+            registry.discover()
+            app._refresh_plugin_buttons()
 
 
 def _add_layer_silently(app, kind: str) -> None:

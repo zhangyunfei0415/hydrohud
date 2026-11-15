@@ -43,8 +43,9 @@ import asyncio
 import inspect
 import sys
 import threading
+from collections.abc import Callable
 from io import BytesIO
-from typing import Any, Callable
+from typing import Any
 
 from PIL import Image
 

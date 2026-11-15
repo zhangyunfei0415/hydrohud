@@ -10,8 +10,9 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 DEFAULT_INTERVAL = 30.0
 APP_DIR_NAME = "HydroHUD"
@@ -146,7 +147,7 @@ class Playlist:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Playlist":
+    def from_dict(cls, data: dict) -> Playlist:
         """由 :meth:`to_dict` 的输出还原；字段缺失时用默认值。"""
         if not isinstance(data, dict):
             raise TypeError(f"播放列表数据必须是字典：{type(data).__name__}")
@@ -170,7 +171,7 @@ class Playlist:
         _atomic_write(target, text)
 
     @classmethod
-    def load(cls, path: Path) -> "Playlist":
+    def load(cls, path: Path) -> Playlist:
         """从 ``path`` 读取；文件不存在或内容损坏时返回空列表。"""
         try:
             text = Path(path).expanduser().read_text(encoding="utf-8")

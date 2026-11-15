@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import copy
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 #: 默认保留的历史项上限。
 DEFAULT_LIMIT = 100

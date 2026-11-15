@@ -1132,7 +1132,7 @@ def load_project(path: str) -> dict:
     """
     if not path:
         raise ValueError("项目路径为空")
-    with open(path, "r", encoding="utf-8-sig") as handle:
+    with open(path, encoding="utf-8-sig") as handle:
         try:
             data = json.load(handle)
         except json.JSONDecodeError as exc:

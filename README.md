@@ -49,8 +49,9 @@
 | **推流** | 10 / 20 / 30 / 60 fps 可选，静态画面自动按 2 s 间隔重推（固件看门狗要求），支持停止与热更新（边改边播） |
 | **设备控制** | 亮度 0–100 滑块、开 / 关屏幕、方向设置、读取设备状态（旋转象限）、一键结束官方软件 |
 | **工程文件** | 画面保存为 `.hud.json`，可分享、可版本管理；**主题包 `.hudpack`** 把工程 + 引用的素材打成一个 zip，一键导出 / 导入 |
-| **插件**（v1.3） | 图层插件放在 `%APPDATA%\HydroHUD\plugins`，用十几行 Python 画任意内容，GUI 自动生成按钮；坏插件只记一条错误，不影响其它插件 |
-| **本地 API / CLI**（v1.3） | `127.0.0.1:4780` 的 HTTP 控制面（token 保护）：读状态、切场景、调亮度、开关屏、开始 / 停止推流、SSE 事件流；配套 `hudctl` 命令行，方便 Home Assistant / Stream Deck / 脚本调用 |
+| **插件**（v1.3 / v1.4） | 图层插件放在 `%APPDATA%\HydroHUD\plugins`，用十几行 Python 画任意内容，GUI 自动生成按钮；插件可以声明 `params`（int / float / bool / text / color / choice），编辑器据此**自动生成控件**（滑块 / 数字框 / 勾选框 / 下拉 / 取色器）；连续抛异常的插件会被隔离，只记一条错误，不影响其它插件；详见 [docs/PLUGINS.md](docs/PLUGINS.md) |
+| **社区预设库**（v1.4） | 「社区 → 预设库」从远程 JSON 索引拉取场景，离线时回落本地缓存；只下载 `.hud.json`，不执行任何代码，装好即可在预设页载入 |
+| **本地 API / CLI**（v1.3 / v1.4） | `127.0.0.1:4780` 的 HTTP 控制面（token 保护）：读状态、切场景、调亮度、开关屏、开始 / 停止推流；SSE `/events` 与 **WebSocket `/ws`** 两种事件流；配套 `hudctl` 命令行和 [Home Assistant 示例](examples/homeassistant/)，方便 Stream Deck / 脚本调用 |
 | **官方素材导入**（v1.3） | 一键扫描 `C:\Program Files (x86)\TcomasSoftware\led*/` 里的官方 GIF / 图片，复制进自己的素材库（只读官方文件，不修改） |
 | **省心功能**（v1.1） | 系统托盘常驻、全局热键、工程轮播、拖放导入文件、界面状态记忆、开机自启、崩溃日志、休眠唤醒自动重连 |
 
@@ -70,7 +71,9 @@ C:\Python314\python.exe -m pip install -r requirements.txt
 C:\Python314\python.exe -m hydrohud
 ```
 
-Python 3.10+；Windows 10/11（协议基于 hid.dll，暂无 Linux/macOS 版本）。
+Python 3.10+；运行时需要 Tkinter。**Windows 10/11 为完整支持**：协议基于 hid.dll，推流、设备控制、托盘、热键全部可用。
+
+Linux：底层的 hidraw 传输层（`hydrohud/transport.py`）与设备表已经就位，udev 规则、桌面入口和安装脚本在 [`packaging/linux/`](packaging/linux/)，装法与 hidraw 与 hidapi 的报文长度差异见 [docs/LINUX.md](docs/LINUX.md)。**端到端推流仍属 v1.4 进行中**，现在还只能跑测试与离线渲染，不会点亮屏幕。macOS 尚未开始。
 
 ### 命令行参数（开机自启常驻）
 
@@ -121,7 +124,20 @@ python -m hydrohud --autostream --project "D:\我的场景.hud.json"
 | **14 类图层** | 右栏「图层」→ 「添加图层…」下拉选，字段说明见 [docs/LAYERS.md](docs/LAYERS.md) |
 | **主题包** | 「主题包 → 导出 / 导入主题包…」，`.hudpack` = 工程 + 引用素材的 zip，可直接发给别人 |
 | **官方素材** | 「主题包 → 导入官方素材到素材库」，扫描已装的 TCOMAS 软件里的 GIF / 图片 |
-| **插件** | 往 `%APPDATA%\HydroHUD\plugins` 丢一个 `.py`，点「插件 → 重载图层插件」，图层页签会出现对应按钮；写法见 [docs/AUTOMATION.md](docs/AUTOMATION.md) |
+| **插件** | 往 `%APPDATA%\HydroHUD\plugins` 丢一个 `.py`，点「插件 → 重载图层插件」，图层页签会出现对应按钮；插件声明了 `params` 后，编辑器会自动生成滑块 / 数字框 / 勾选框 / 下拉 / 取色器。写法见 [docs/PLUGINS.md](docs/PLUGINS.md) |
+| **社区预设** | 「社区 → 预设库」，从远程索引挑现成场景一键装上；离线时用本地缓存，装好即出现在预设页 |
+| **插件目录** | 「插件 → 打开插件目录」直接跳进 `%APPDATA%\HydroHUD\plugins`，不用自己找路径 |
+
+## 平台化（v1.4）
+
+| 功能 | 用法 |
+| --- | --- |
+| **插件参数自动表单** | 插件用 `PARAM_TYPES`（int / float / bool / text / color / choice）声明参数，编辑器按声明生成控件并自动夹取范围，插件只读 `layer[key]` |
+| **插件故障隔离** | 单次绘制超过 0.25 s 记入 `slow`；连续 3 次抛异常后该插件被 quarantine，只留一条错误，其它图层继续渲染（重载插件即恢复） |
+| **权限声明** | 插件可声明 `permissions: ["network", "filesystem"]`，编辑器显示「需要网络访问、文件读写（仅供参考，不做强制）」 |
+| **WebSocket 事件流** | `ws://127.0.0.1:4780/ws`，RFC 6455 握手，每秒一条状态 JSON，`?limit=N` 发满即关；见 [docs/AUTOMATION.md](docs/AUTOMATION.md) |
+| **Home Assistant** | [examples/homeassistant/](examples/homeassistant/) 里是可直接用的 REST 传感器 + 服务定义 |
+| **Linux 打包资源** | `packaging/linux/` 有 udev 规则、安装脚本、`.desktop` 入口，装法见 [docs/LINUX.md](docs/LINUX.md) |
 
 ## 快捷键 · 托盘 · 轮播（v1.1）
 
@@ -202,6 +218,8 @@ powershell -ExecutionPolicy Bypass -File build.ps1 -Clean
 
 无 Python 环境也能运行。首次启动会比源码方式慢 1–2 秒（单文件解包）。
 
+推一个 `v*` tag（例如 `git tag v1.4.0 && git push origin v1.4.0`）会触发 CI 的 `release` job：跑完测试与 lint 后打包 exe、自动建 GitHub Release、附上 `HydroHUD.exe` 并生成变更日志。
+
 ## 场景文件格式（`.hud.json`）
 
 ```json
@@ -264,8 +282,9 @@ HydroHUD/
 │   ├── weather.py    天气（Open-Meteo，免 key，缓存 + 离线降级）
 │   ├── media.py      正在播放（Windows SMTC，winsdk 可选）
 │   ├── capture.py    屏幕捕获（ImageGrab 缩略到 480）
-│   ├── plugins.py    图层插件注册表（APPDATA\HydroHUD\plugins）
-│   ├── api.py        本地 HTTP 控制面（127.0.0.1:4780，token + SSE）
+│   ├── plugins.py    图层插件注册表（APPDATA\HydroHUD\plugins，参数声明 + 故障隔离）
+│   ├── presetslib.py 社区预设库（远程 JSON 索引 + 离线缓存 + 一键安装）
+│   ├── api.py        本地 HTTP 控制面（127.0.0.1:4780，token + SSE + WebSocket）
 │   ├── hudctl.py     API 的命令行客户端
 │   ├── themepack.py  .hudpack 主题包导入导出
 │   ├── qrmini.py     纯 Python 二维码编码器（无第三方依赖）
@@ -279,23 +298,28 @@ HydroHUD/
 │   └── __main__.py   python -m hydrohud 入口
 ├── docs/PROTOCOL.md  屏幕 HID 协议逆向记录（含 flash 上传子协议）
 ├── docs/LAYERS.md    14 类图层与背景的字段参考
-├── docs/AUTOMATION.md 本地 API / hudctl / 插件 / 主题包
+├── docs/PLUGINS.md   插件协议：PLUGIN 字典、params 参数声明、隔离与权限
+├── docs/AUTOMATION.md 本地 API / hudctl / 主题包
+├── docs/LINUX.md     Linux 传输层、udev 规则与现状
+├── packaging/linux/  udev 规则、安装脚本、桌面入口
 ├── ROADMAP.md        后续版本规划与待验证实验
 ├── AGENTS.md         给编码 agent 的移植与扩展说明书
-├── tests/            pytest 用例（802 项，全部纯软件，无需硬件）
+├── tests/            pytest 用例（928 项，全部纯软件，无需硬件）
 ├── preview/          预设 / 背景 / v1.3 新能力渲染预览图（contact-sheet.png 是总览）
-├── examples/         示例工程 .hud.json + 示例插件
+├── examples/         示例工程 .hud.json + 示例插件 + Home Assistant 集成包
 ├── assets/           图标、界面截图
 ├── tools/            预览图 / 真机自检 / GUI 无人值守自检脚本
 ├── launcher.py       PyInstaller 入口
 ├── make_icon.py      生成图标
 ├── build.ps1         一键打包
+├── pyproject.toml    black / ruff 共享配置
 └── requirements.txt
 ```
 
 ## 已知限制
 
-- 仅 Windows；仅 LG600（PID 1520）。LG700（1A2C:151C）走另一套 USB 实现，未验证。
+- **Windows 为完整支持平台**：推流、设备控制、托盘、热键只在 Windows 上验证过。Linux 已有 hidraw 传输层、udev 规则和安装脚本，端到端推流仍在 v1.4 开发中（见 [docs/LINUX.md](docs/LINUX.md)），macOS 未开始。
+- 仅 LG600（PID 1520）经过真机验证。LG700（1A2C:151C）已登记设备表，协议推定与 LG600 相同但未实测（见 [docs/PROTOCOL.md](docs/PROTOCOL.md)）。
 - 单帧 46920 字节上限：质量 100 的照片（约 42–46 KB，正好吃满预算）能原样上屏；只有逐像素噪点这种病态素材才会被迫降质量。
 - CPU 温度 / CPU 功耗 / 风扇转速依赖第三方监控软件的共享内存（LHM / HWiNFO），没装就显示「—」。
 - 折线图历史只存在于内存（默认 120 个采样点，0.5 s 一个 ≈ 1 分钟），重启后重新累积。
@@ -308,7 +332,7 @@ HydroHUD/
 
 ## 路线图
 
-未来规划（v1.1 顺手 ✅ → v1.2 内容 ✅ → v1.3 编辑与平台化 → v1.4 跨平台 → v2.0 社区）见
+未来规划（v1.1 顺手 ✅ → v1.2 内容 ✅ → v1.3 编辑 ✅ → v1.4 平台化 ✅ → v2.0 社区生态）见
 [ROADMAP.md](ROADMAP.md)，其中列了各版本的功能清单、工作量、需要先用真机验证的实验
 （E1/E5 已在真机做完：46 包画质上限成立，640×640 会让设备掉线；flash 上传换开机图的 E2 已实现代码、待真机验证）。
 

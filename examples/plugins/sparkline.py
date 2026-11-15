@@ -72,5 +72,26 @@ PLUGIN = {
         "thickness": 3,
         "frequency": 3,
     },
+    "params": [
+        {
+            "key": "thickness",
+            "label": "线宽",
+            "type": "int",
+            "default": 3,
+            "min": 1,
+            "max": 12,
+        },
+        {
+            "key": "frequency",
+            "label": "波的密度",
+            "type": "float",
+            "default": 3.0,
+            "min": 0.5,
+            "max": 12.0,
+            "step": 0.5,
+        },
+        {"key": "color", "label": "线颜色", "type": "color", "default": "#38BDF8"},
+        {"key": "background", "label": "底色", "type": "color", "default": "#111827"},
+    ],
     "draw": draw,
 }

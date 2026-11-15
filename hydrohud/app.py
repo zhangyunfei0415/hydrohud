@@ -31,13 +31,13 @@ import shutil
 import sys
 import threading
 import time
-import traceback
-from functools import lru_cache
-from typing import Any, Callable
-
 import tkinter as tk
+import traceback
+from collections.abc import Callable
+from functools import lru_cache
 from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 from tkinter import font as tkfont
+from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
@@ -141,6 +141,7 @@ capture_mod = _import_optional("capture")
 plugins_mod = _import_optional("plugins")
 api_mod = _import_optional("api")
 themepack_mod = _import_optional("themepack")
+presetslib_mod = _import_optional("presetslib")
 
 try:  # 版本号来自包 __init__，缺失时退回内置值
     from . import __version__ as APP_VERSION
@@ -161,6 +162,8 @@ API_DEFAULT_PORT = 4780
 THEME_PACK_FILETYPES = [("HydroHUD 主题包", "*.hudpack"), ("所有文件", "*.*")]
 PLUGIN_DIR_NAME = "plugins"
 VENDOR_ASSET_DIR = r"C:\Program Files (x86)\TcomasSoftware"
+#: 插件 permissions 声明在编辑器里的中文说明（只用于提示，不做任何强制）。
+_PERMISSION_LABELS = {"network": "网络访问", "filesystem": "文件读写"}
 
 # --------------------------------------------------------------------------- #
 # 主题
@@ -723,7 +726,7 @@ def _fallback_presets() -> dict[str, dict]:
 class RenderWorker:
     """后台预览渲染线程：只保留最新请求，结果通过队列交给 UI 线程。"""
 
-    def __init__(self, app: "App") -> None:
+    def __init__(self, app: App) -> None:
         self.app = app
         self.results: queue.Queue = queue.Queue(maxsize=4)
         self._cond = threading.Condition()
@@ -858,6 +861,7 @@ class App(tk.Tk):
         self._canvas_editor: Any | None = None
         self._editor_mode = False
         self._plugin_row: tk.Frame | None = None
+        self._preset_library: tk.Toplevel | None = None
         self._api: Any | None = None
         self._api_host: Any | None = None
         self._api_status: dict = {}
@@ -1151,7 +1155,14 @@ class App(tk.Tk):
 
         plugin_menu = tk.Menu(menubar, **menu_options)
         plugin_menu.add_command(label="重载图层插件", command=self._on_reload_plugins)
+        plugin_menu.add_separator()
+        plugin_menu.add_command(label="打开插件目录", command=self._on_open_plugin_dir)
         menubar.add_cascade(label="插件", menu=plugin_menu)
+
+        community_menu = tk.Menu(menubar, **menu_options)
+        community_menu.add_command(label="预设库…", command=self._on_open_preset_library)
+        community_menu.add_command(label="打开预设目录", command=self._on_open_presets_dir)
+        menubar.add_cascade(label="社区", menu=community_menu)
 
         advanced_menu = tk.Menu(menubar, **menu_options)
         advanced_menu.add_command(label="启动 / 停止本地 API", command=self._on_toggle_api)
@@ -1949,7 +1960,7 @@ class App(tk.Tk):
         if scenes_mod is not None and hasattr(scenes_mod, "load_project"):
             data = scenes_mod.load_project(path)
         else:
-            with open(path, "r", encoding="utf-8") as handle:
+            with open(path, encoding="utf-8") as handle:
                 data = json.load(handle)
             if isinstance(data, dict) and "scene" in data and isinstance(data["scene"], dict):
                 data = data["scene"]
@@ -2271,7 +2282,7 @@ class App(tk.Tk):
             _safe_float(background.get("fps"), 5.0, 0.5, 30.0),
         ]
         for key, value in zip(
-            ("region_x", "region_y", "region_w", "region_h", "capture_fps"), values
+            ("region_x", "region_y", "region_w", "region_h", "capture_fps"), values, strict=True
         ):
             scale = self._capture_scales.get(key) if hasattr(self, "_capture_scales") else None
             label = self._capture_labels.get(key) if hasattr(self, "_capture_labels") else None
@@ -2285,7 +2296,7 @@ class App(tk.Tk):
                 label.configure(
                     text=f"{value:.2f}" if key != "capture_fps" else f"{int(round(value))}"
                 )
-        for key, scale in (getattr(self, "_capture_scales", {}) or {}).items():
+        for scale in (getattr(self, "_capture_scales", {}) or {}).values():
             self._set_widget_enabled(scale, is_capture)
 
     @staticmethod
@@ -3061,6 +3072,185 @@ class App(tk.Tk):
         self._refresh_layer_list()
         self._set_status(f"已添加插件图层 {name}", "ok")
 
+    # -- 社区预设库 ------------------------------------------------------ #
+    def _on_open_plugin_dir(self) -> None:
+        """在文件管理器里打开插件目录，方便用户放进自己的插件文件。"""
+        folder = _plugin_dir()
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except OSError as exc:
+            self._set_status(f"插件目录不可用：{exc}（路径：{folder}）", "warn")
+            return
+        self._open_folder(folder, "插件目录")
+
+    def _on_open_presets_dir(self) -> None:
+        """打开已安装的社区预设目录。"""
+        if presetslib_mod is None:
+            self._set_status("预设库模块未就绪（hydrohud/presetslib.py 缺失）", "warn")
+            return
+        try:
+            folder = str(presetslib_mod.presets_dir())
+        except Exception as exc:
+            self._set_status(f"找不到预设目录：{exc}", "warn")
+            return
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except OSError as exc:
+            self._set_status(f"预设目录不可写：{exc}（路径：{folder}）", "warn")
+            return
+        self._open_folder(folder, "预设目录")
+
+    def _open_folder(self, folder: str, what: str) -> None:
+        """用系统文件管理器打开目录；失败时把路径交给用户。"""
+        try:
+            os.startfile(folder)  # noqa: S606 - 打开资源管理器是预期行为
+        except Exception as exc:
+            self._set_status(f"打开{what}失败：{exc}（路径：{folder}）", "warn")
+            return
+        self._set_status(f"已打开{what}：{folder}", "ok")
+
+    def _on_open_preset_library(self) -> None:
+        """打开社区预设库窗口：联网拉索引、离线回落缓存、单击安装到预设目录。"""
+        if presetslib_mod is None:
+            self._set_status("预设库模块未就绪（hydrohud/presetslib.py 缺失）", "warn")
+            return
+        if self._preset_library is not None:
+            try:
+                self._preset_library.deiconify()
+                self._preset_library.lift()
+                return
+            except tk.TclError:
+                self._preset_library = None
+
+        dialog = tk.Toplevel(self)
+        dialog.title("社区预设库")
+        dialog.configure(bg=BG)
+        dialog.transient(self)
+        dialog.resizable(False, False)
+        frame = tk.Frame(dialog, bg=BG)
+        frame.pack(fill="both", expand=True, padx=16, pady=14)
+        self._preset_library = dialog
+
+        self._label(
+            frame,
+            "预设从社区索引下载，安装到本地预设目录后可在「预设」页载入。只下载场景 JSON，"
+            "不会执行任何代码。",
+            size=8,
+            color=MUTED,
+            wrap=420,
+        ).pack(anchor="w", pady=(0, 8))
+
+        holder = tk.Frame(frame, bg=BG)
+        holder.pack(fill="both", expand=True)
+        listing = self._dark_listbox(holder, height=10)
+        listing.configure(width=52)
+        listing.pack(side="left", fill="both", expand=True)
+        scrollbar = self._attach_scrollbar(listing, holder)
+        scrollbar.pack(side="right", fill="y")
+
+        detail = self._label(frame, "选择一条预设查看说明。", size=8, color=MUTED, wrap=420)
+        detail.pack(anchor="w", pady=(8, 0))
+
+        buttons = tk.Frame(frame, bg=BG)
+        buttons.pack(fill="x", pady=(10, 0))
+        status = self._label(buttons, "", size=8, color=MUTED, wrap=300)
+        status.pack(side="left")
+
+        entries: list[dict] = []
+        state: dict[str, Any] = {"busy": False}
+        results: queue.Queue = queue.Queue()
+
+        def apply(items: list, online: bool) -> None:
+            state["busy"] = False
+            entries.clear()
+            listing.delete(0, "end")
+            for item in items:
+                entries.append(item)
+                listing.insert("end", str(item.get("name") or "未命名预设"))
+            if not entries:
+                reason = presetslib_mod.last_error() or "索引里没有可安装的预设"
+                status.configure(text=f"未获取到预设：{reason}", fg=WARN)
+                return
+            source = "社区索引" if online else "本地缓存（离线）"
+            status.configure(text=f"共 {len(entries)} 个预设 · 来自{source}", fg=OK)
+
+        def poll() -> None:
+            try:
+                items, online = results.get_nowait()
+            except queue.Empty:
+                if state["busy"]:
+                    dialog.after(120, poll)
+                return
+            apply(items, online)
+
+        def work() -> None:
+            try:
+                items, online = presetslib_mod.index_or_cache()
+            except Exception:  # index_or_cache 理论上不抛，这里兜住线程
+                items, online = [], False
+            results.put((items, online))
+
+        def refresh() -> None:
+            if state["busy"]:
+                return
+            state["busy"] = True
+            status.configure(text="正在获取预设索引…", fg=MUTED)
+            threading.Thread(target=work, name="preset-library", daemon=True).start()
+            dialog.after(120, poll)
+
+        def on_select(_event: tk.Event | None = None) -> None:
+            selection = listing.curselection()
+            if not selection or selection[0] >= len(entries):
+                return
+            entry = entries[selection[0]]
+            parts = [str(entry.get("name") or "未命名预设")]
+            if entry.get("author"):
+                parts.append(f"作者 {entry['author']}")
+            if entry.get("version"):
+                parts.append(f"v{entry['version']}")
+            if entry.get("tags"):
+                parts.append("标签 " + "、".join(str(tag) for tag in entry["tags"]))
+            if entry.get("description"):
+                parts.append(str(entry["description"]))
+            detail.configure(text=" · ".join(parts[:4]))
+
+        def install() -> None:
+            selection = listing.curselection()
+            if not selection or selection[0] >= len(entries):
+                status.configure(text="先在列表里选一个预设", fg=WARN)
+                return
+            entry = entries[selection[0]]
+            try:
+                path = presetslib_mod.install_preset(entry)
+            except Exception as exc:
+                status.configure(text=f"安装失败：{exc}", fg=ERR)
+                return
+            name = str(entry.get("name") or path.stem)
+            status.configure(text=f"已安装「{name}」到 {path.parent}", fg=OK)
+            self._set_status(f"已安装社区预设「{name}」", "ok")
+
+        def on_close() -> None:
+            state["busy"] = False
+            self._preset_library = None
+            try:
+                dialog.destroy()
+            except tk.TclError:
+                pass
+
+        ttk.Button(buttons, text="关闭", style="Small.TButton", command=on_close).pack(side="right")
+        ttk.Button(buttons, text="安装选中", style="Small.TButton", command=install).pack(
+            side="right", padx=(0, 8)
+        )
+        ttk.Button(buttons, text="刷新", style="Small.TButton", command=refresh).pack(
+            side="right", padx=(0, 8)
+        )
+        listing.bind("<<ListboxSelect>>", on_select)
+        dialog.protocol("WM_DELETE_WINDOW", on_close)
+
+        dialog.update_idletasks()
+        dialog.geometry(f"+{self.winfo_rootx() + 240}+{self.winfo_rooty() + 160}")
+        refresh()
+
     # -- 本地 HTTP API --------------------------------------------------- #
     def _on_toggle_api(self) -> None:
         if api_mod is None:
@@ -3256,9 +3446,14 @@ class App(tk.Tk):
             "weather": "天气",
             "nowplaying": "正在播放",
         }
+        plugin_spec = self._plugin_spec_for(kind)
+        plugin_params = plugin_spec.params if plugin_spec is not None else ()
+        title = type_names.get(kind) or (
+            plugin_spec.label if plugin_spec is not None else str(kind or "未知图层")
+        )
         self._label(
             self._layer_editor,
-            f"图层 {self._layer_index + 1} · {type_names.get(kind, kind)}",
+            f"图层 {self._layer_index + 1} · {title}",
             size=10,
             color=ACCENT,
             bold=True,
@@ -3693,6 +3888,9 @@ class App(tk.Tk):
                 grid, row, "背景色", _norm_color(layer.get("bg"), "#FFFFFF"), "bg"
             )
             row += 1
+        elif plugin_params:
+            # 插件自己声明了参数：颜色等外观字段由声明覆盖，不再注入通用控件。
+            pass
         else:
             self._editor_color_row(
                 grid, row, "颜色", _norm_color(layer.get("color"), "#FFFFFF"), "color"
@@ -3722,6 +3920,9 @@ class App(tk.Tk):
         row += 1
         self._editor_scale_row(grid, row, "位置 Y", _safe_float(layer.get("y"), 0.5, 0.0, 1.0), "y")
         row += 1
+
+        if plugin_params:
+            row = self._plugin_param_rows(grid, row, plugin_spec, layer)
 
         if kind in ("text", "clock", "sysinfo"):
             self._grid_label(grid, row, "样式")
@@ -3879,6 +4080,185 @@ class App(tk.Tk):
             ),
         )
         scale.pack(side="left", fill="x", expand=True)
+
+    # -- 插件参数表单 ---------------------------------------------------- #
+    def _plugin_spec_for(self, kind: Any) -> Any:
+        """按图层类型名取插件声明；不是插件图层或插件系统不可用时返回 ``None``。"""
+        if plugins_mod is None or not kind:
+            return None
+        try:
+            return plugins_mod.registry().get(str(kind))
+        except Exception as exc:
+            _warn_once(f"读取插件声明失败：{exc}")
+            return None
+
+    def _apply_plugin_value(self, param: Any, value: Any) -> None:
+        """把控件值按参数声明转型后写入图层字段。"""
+        if plugins_mod is None:
+            return
+        try:
+            coerced = plugins_mod.coerce_param(param, value)
+        except Exception as exc:
+            _warn_once(f"参数 {getattr(param, 'key', '?')} 校验失败：{exc}")
+            return
+        self._apply_layer_field(param.key, coerced)
+
+    def _plugin_param_rows(self, grid: tk.Misc, row: int, spec: Any, layer: dict) -> int:
+        """按插件声明的参数生成编辑控件；返回下一个可用行号。"""
+        if plugins_mod is not None:
+            try:
+                if plugins_mod.registry().is_quarantined(spec.name):
+                    self._grid_label(grid, row, "状态")
+                    warn = self._label(
+                        grid,
+                        "该插件连续绘制失败已被暂停；修好后点「插件 → 重载」。",
+                        size=8,
+                        color=WARN,
+                        wrap=220,
+                    )
+                    warn.grid(row=row, column=1, sticky="ew", pady=2)
+                    row += 1
+            except Exception as exc:
+                _warn_once(f"读取插件隔离状态失败：{exc}")
+
+        permissions = getattr(spec, "permissions", ()) or ()
+        if permissions:
+            self._grid_label(grid, row, "插件声明")
+            hint = self._label(
+                grid,
+                f"需要{'、'.join(_PERMISSION_LABELS.get(p, p) for p in permissions)}（仅供参考，不做强制）",
+                size=8,
+                color=MUTED,
+                wrap=220,
+            )
+            hint.grid(row=row, column=1, sticky="ew", pady=2)
+            row += 1
+
+        for param in spec.params:
+            current = layer.get(param.key, param.default)
+            if param.type in ("int", "float"):
+                row = self._plugin_number_row(grid, row, param, current)
+            elif param.type == "bool":
+                self._grid_label(grid, row, param.label)
+                var = tk.BooleanVar(value=bool(current))
+                tk.Checkbutton(
+                    grid,
+                    text="启用",
+                    variable=var,
+                    bg=CARD,
+                    fg=TEXT,
+                    activebackground=CARD,
+                    activeforeground=TEXT,
+                    selectcolor=ENTRY_BG,
+                    highlightthickness=0,
+                    bd=0,
+                    font=(FONT_FAMILY, 9),
+                    command=lambda p=param, v=var: self._apply_plugin_value(p, bool(v.get())),
+                ).grid(row=row, column=1, sticky="w", pady=2)
+                row += 1
+            elif param.type == "color":
+                self._editor_color_row(
+                    grid,
+                    row,
+                    param.label,
+                    _norm_color(current, param.default),
+                    param.key,
+                )
+                row += 1
+            elif param.type == "choice":
+                self._grid_label(grid, row, param.label)
+                labels = [label for _value, label in param.options]
+                label_by_value = {value: label for value, label in param.options}
+                value_by_label = {label: value for value, label in param.options}
+                var = tk.StringVar(value=label_by_value.get(str(current), labels[0]))
+                combo = ttk.Combobox(grid, textvariable=var, values=labels, state="readonly")
+                combo.grid(row=row, column=1, sticky="ew", pady=2)
+                var.trace_add(
+                    "write",
+                    lambda *_args, p=param, v=var, lookup=value_by_label: (
+                        self._apply_plugin_value(p, lookup.get(v.get(), p.default))
+                    ),
+                )
+                row += 1
+            else:
+                self._grid_label(grid, row, param.label)
+                var = tk.StringVar(value=str(current))
+                entry = ttk.Entry(grid, textvariable=var)
+                entry.grid(row=row, column=1, sticky="ew", pady=2)
+                var.trace_add(
+                    "write",
+                    lambda *_args, p=param, v=var: self._apply_plugin_value(p, v.get()),
+                )
+                row += 1
+        return row
+
+    def _plugin_number_row(self, grid: tk.Misc, row: int, param: Any, current: Any) -> int:
+        """数值参数：整数用 Spinbox，浮点用 Scale；范围取自参数声明。"""
+        low = param.min if param.min is not None else (0.0 if param.type == "float" else 0.0)
+        high = param.max if param.max is not None else (1.0 if param.type == "float" else 100.0)
+        self._grid_label(grid, row, param.label)
+        if param.type == "int":
+            var = tk.StringVar(value=str(int(current)))
+            step = int(param.step) if param.step else 1
+            spinbox = tk.Spinbox(
+                grid,
+                from_=int(low),
+                to=int(high),
+                increment=max(1, step),
+                textvariable=var,
+                width=6,
+                bg=ENTRY_BG,
+                fg=TEXT,
+                insertbackground=TEXT,
+                buttonbackground=BTN,
+                relief="flat",
+                highlightthickness=1,
+                highlightbackground=BORDER,
+                highlightcolor=ACCENT,
+                font=(FONT_FAMILY, 9),
+            )
+            spinbox.grid(row=row, column=1, sticky="w", pady=2)
+            var.trace_add(
+                "write",
+                lambda *_args, p=param, v=var: self._apply_plugin_number(p, v.get()),
+            )
+            return row + 1
+
+        holder = tk.Frame(grid, bg=CARD)
+        holder.grid(row=row, column=1, sticky="ew", pady=2)
+        digits = 2
+        if param.step:
+            digits = max(0, min(4, len(f"{param.step:.4f}".split(".")[1].rstrip("0"))))
+        value_label = self._label(
+            holder, f"{float(current):.{digits}f}", size=8, color=ACCENT, bold=True
+        )
+        value_label.pack(side="right", padx=(8, 0))
+        scale = ttk.Scale(
+            holder,
+            from_=float(low),
+            to=float(high),
+            value=float(current),
+            command=lambda raw, p=param, lbl=value_label, d=digits: self._apply_plugin_float(
+                p, raw, lbl, d
+            ),
+        )
+        scale.pack(side="left", fill="x", expand=True)
+        return row + 1
+
+    def _apply_plugin_number(self, param: Any, raw: Any) -> None:
+        try:
+            number = int(str(raw).strip())
+        except (TypeError, ValueError):
+            return
+        self._apply_plugin_value(param, number)
+
+    def _apply_plugin_float(self, param: Any, raw: Any, label: tk.Label, digits: int) -> None:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return
+        label.configure(text=f"{value:.{digits}f}")
+        self._apply_plugin_value(param, value)
 
     # ------------------------------------------------------------------ #
     # 设备控制

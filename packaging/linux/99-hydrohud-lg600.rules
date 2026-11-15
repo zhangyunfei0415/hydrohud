@@ -1,0 +1,19 @@
+# HydroHUD — TCOMAS LG600 / LG700 480x480 USB display
+#
+# The panel exposes two vendor-defined HID collections (MI_00 for control,
+# MI_01 for the image stream). HydroHUD talks to them through hidraw, so the
+# logged-in user needs write access to both device nodes.
+#
+# Install:
+#   sudo cp packaging/linux/99-hydrohud-lg600.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger
+#
+# Or run the bundled installer (idempotent, does the same three steps):
+#   sudo bash packaging/linux/install-udev.sh
+#
+# 1a2c:1520 (LG600) is verified on hardware; 1a2c:151c (LG700) is in the device
+# table but has not been tested on a real panel.
+
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1a2c", ATTRS{idProduct}=="1520", MODE="0660", TAG+="uaccess", GROUP="plugdev"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1a2c", ATTRS{idProduct}=="151c", MODE="0660", TAG+="uaccess", GROUP="plugdev"

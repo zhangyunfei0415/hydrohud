@@ -772,7 +772,7 @@ def _paint_text_block(
     else:
         block_left = x - widest / 2.0
     cursor = start_y
-    for (text, font, fill), (height, width) in zip(lines, metrics):
+    for (text, font, fill), (height, _width) in zip(lines, metrics, strict=True):
         if not text:
             cursor += height + spacing
             continue
@@ -1169,7 +1169,7 @@ def _smooth_points(points: list[tuple[float, float]]) -> list[tuple[float, float
     if len(points) < 3:
         return points
     smoothed: list[tuple[float, float]] = [points[0]]
-    for (x0, y0), (x1, y1) in zip(points, points[1:]):
+    for (x0, y0), (x1, y1) in zip(points, points[1:], strict=False):
         smoothed.append((x0 * 0.75 + x1 * 0.25, y0 * 0.75 + y1 * 0.25))
         smoothed.append((x0 * 0.25 + x1 * 0.75, y0 * 0.25 + y1 * 0.75))
     smoothed.append(points[-1])
@@ -2299,7 +2299,7 @@ def _nowplaying_text_image(layer: dict, lines: list[tuple[str, str]]) -> Image.I
     width = 1
     height = 0
     rendered: list[tuple[str, ImageFont.ImageFont, tuple[int, int, int], int]] = []
-    for index, (kind, text) in enumerate(lines):
+    for index, (_kind, text) in enumerate(lines):
         font = title_font if index == 0 else meta_font
         color = title_color if index == 0 else meta_color
         ascent, descent = font.getmetrics()

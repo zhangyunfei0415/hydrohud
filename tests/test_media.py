@@ -55,7 +55,7 @@ class FakeReference:
 class FakeReader:
     """``DataReader`` 替身：记录 ``load_async`` 的调用并返回原始字节。"""
 
-    instances: list["FakeReader"] = []
+    instances: list[FakeReader] = []
 
     def __init__(self, stream: FakeStream) -> None:
         self.stream = stream
@@ -132,7 +132,7 @@ class FakeManager:
         self.session_calls = 0
 
     @staticmethod
-    async def request_async() -> "FakeManager":
+    async def request_async() -> FakeManager:
         FakeManager.requests += 1
         if FakeManager.fail_request is not None:
             raise FakeManager.fail_request

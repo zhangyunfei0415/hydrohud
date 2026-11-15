@@ -1,0 +1,107 @@
+# HydroHUD × Home Assistant 集成示例
+#
+# 用法：
+# 1. 在 HydroHUD 菜单「高级 → 启动本地 API」启动服务（默认 127.0.0.1:4780）；
+#    「高级 → 复制 API Token」取得 token，它的文件是 %APPDATA%\HydroHUD\api-token.txt。
+# 2. 把下面的 rest: / rest_command: / template: 三段合并进 configuration.yaml，
+#    或放进 config/packages/hydrohud.yaml 并在 configuration.yaml 用 packages 引入。
+# 3. 重启 Home Assistant（新增 rest_command 必须重启核心；只改 sensor 可「重新加载 YAML」）。
+#
+# 监控字段（GET /status）：device / streaming / fps / frames / brightness / project / scene / dirty
+# 指标字段（GET /metrics）：cpu / gpu / gpu_temp / memory 等，随传感器后端而定。
+
+rest:
+  - resource: "http://127.0.0.1:4780/status"
+    scan_interval: 5
+    headers:
+      X-HydroHUD-Token: "在这里粘贴 api-token.txt 的内容"
+    sensor:
+      - name: "HydroHUD 状态"
+        unique_id: hydrohud_status
+        value_template: "{{ '在线' if value_json.device else '离线' }}"
+        json_attributes:
+          - streaming
+          - fps
+          - frames
+          - brightness
+          - project
+          - scene
+          - dirty
+
+  - resource: "http://127.0.0.1:4780/metrics"
+    scan_interval: 5
+    headers:
+      X-HydroHUD-Token: "在这里粘贴 api-token.txt 的内容"
+    sensor:
+      - name: "HydroHUD CPU"
+        unique_id: hydrohud_cpu
+        value_template: "{{ value_json.cpu }}"
+        unit_of_measurement: "%"
+      - name: "HydroHUD GPU 温度"
+        unique_id: hydrohud_gpu_temp
+        value_template: "{{ value_json.gpu_temp }}"
+        unit_of_measurement: "°C"
+
+rest_command:
+  hydrohud_brightness:
+    url: "http://127.0.0.1:4780/brightness"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+      X-HydroHUD-Token: "在这里粘贴 api-token.txt 的内容"
+    payload: '{"value": {{ value | int(0, 100) }}}'
+
+  hydrohud_power_on:
+    url: "http://127.0.0.1:4780/power"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+      X-HydroHUD-Token: "在这里粘贴 api-token.txt 的内容"
+    payload: '{"on": true}'
+
+  hydrohud_power_off:
+    url: "http://127.0.0.1:4780/power"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+      X-HydroHUD-Token: "在这里粘贴 api-token.txt 的内容"
+    payload: '{"on": false}'
+
+  hydrohud_stream_on:
+    url: "http://127.0.0.1:4780/stream"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+      X-HydroHUD-Token: "在这里粘贴 api-token.txt 的内容"
+    payload: '{"on": true}'
+
+  hydrohud_stream_off:
+    url: "http://127.0.0.1:4780/stream"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+      X-HydroHUD-Token: "在这里粘贴 api-token.txt 的内容"
+    payload: '{"on": false}'
+
+  hydrohud_scene:
+    url: "http://127.0.0.1:4780/scene"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+      X-HydroHUD-Token: "在这里粘贴 api-token.txt 的内容"
+    payload: '{"scene": {{ scene | tojson }}}'
+
+template:
+  - sensor:
+      - name: "HydroHUD 中文摘要"
+        unique_id: hydrohud_summary
+        state: >-
+          {% set s = states('sensor.hydrohud_status') %}
+          {% if s == '在线' %}
+          推流中 {{ state_attr('sensor.hydrohud_status', 'fps') }} fps，已推 {{ state_attr('sensor.hydrohud_status', 'frames') }} 帧
+          {% else %}
+          未连接（请在 HydroHUD 中启动本地 API）
+          {% endif %}
+        attributes:
+          亮度: "{{ state_attr('sensor.hydrohud_status', 'brightness') }}%"
+          当前场景: "{{ state_attr('sensor.hydrohud_status', 'scene') }}"

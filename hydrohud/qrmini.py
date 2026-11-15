@@ -19,7 +19,6 @@ and version information.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from typing import Any
 
 __all__ = [
     "EC_BLOCK_TABLE",
@@ -496,7 +495,6 @@ def _place_data(
     codewords: bytes,
     size: int,
 ) -> None:
-    total_bits = len(codewords) * 8
     direction = -1
     row = size - 1
     bit_index = 7

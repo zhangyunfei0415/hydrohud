@@ -131,8 +131,8 @@ def _make_gif(path: str) -> None:
 def _make_video(path: str) -> bool:
     """生成 60 帧 mp4；缺少 imageio/numpy 时返回 False。"""
     try:
-        import numpy
         import imageio
+        import numpy
     except ImportError:
         return False
     width = height = 480
