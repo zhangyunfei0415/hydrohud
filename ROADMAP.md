@@ -21,7 +21,7 @@ v1.2.0 补上了「系统状态」这条主线（23 项指标、折线图/仪表
 | 工程 | `.hud.json` 工程文件；**11 个中文预设**；`.hudpack` 主题包（工程 + 素材 zip）；官方素材扫描导入 |
 | 自动化（v1.3） | 本地 HTTP API（`127.0.0.1:4780`，token + SSE `/events` + **WebSocket `/ws`**，附 `examples/homeassistant/`）+ `hudctl` CLI；图层插件（`%APPDATA%\HydroHUD\plugins`，**参数声明 + 自动表单 + 故障隔离**）；**社区预设库**（`presetslib.py`：远程 JSON 索引 + 离线缓存 + 一键安装） |
 | 常驻能力（v1.1） | 系统托盘、全局热键、工程轮播、拖放导入、界面状态记忆、开机自启开关、崩溃日志、休眠唤醒自动重连 |
-| 分发 | PyInstaller 单文件 exe（约 73 MB）；**928 项 pytest**；`tools/check_device.py` 硬件自检、`tools/verify_v11.py` / `verify_v13.py` 真机帧率回归、`tools/gui_check.py` 无人值守 GUI 自检（38 项） |
+| 分发 | PyInstaller 单文件 exe（约 73 MB）；**944 项 pytest**；`tools/check_device.py` 硬件自检、`tools/verify_v11.py` / `verify_v13.py` 真机帧率回归、`tools/gui_check.py` 无人值守 GUI 自检（40 项） |
 | 协议文档 | 仓库内 `docs/PROTOCOL.md`、`docs/LAYERS.md`、`docs/AUTOMATION.md`、`docs/PLUGINS.md`、`docs/LINUX.md` |
 
 已知没做的：flash 上传的真机验证、`0x18`/`0x1A`/`0x1E` 三个设置命令、LG700 型号、Linux 真机验证、多屏、代码签名、国际化。
@@ -165,7 +165,7 @@ v1.4.0 先落地了「平台化」里不依赖硬件的那一半：插件参数�
 
 | 项 | 现状 | 计划 |
 | --- | --- | --- |
-| 测试 | **928 项**（渲染 14 类图层 / 图表仪表 / 场景 / 传感器 / 分帧 / 编码 / 撤销重做 / 画布几何 / 插件参数与隔离 / 预设库 / API + WS / hudctl / 主题包 / 天气 / 捕捉 / 传输 / Linux 打包）；设备层用 `FakeTransport` + 桩 `write_report` 覆盖报文序列 | ✅ CI 已强制（ubuntu + windows × Py 3.10/3.12/3.13 + black + 打包）；真机路径只能靠 `tools/check_device.py` / `verify_v11.py` / `verify_v13.py` / `gui_check.py`（38 项无人值守 GUI 自检） |
+| 测试 | **944 项**（渲染 14 类图层 / 图表仪表 / 场景 / 传感器 / 分帧 / 编码 / 撤销重做 / 画布几何 / 插件参数与隔离 / 预设库 / API + WS / hudctl / 主题包 / 天气 / 捕捉 / 传输 / Linux 打包与 hidraw 后端）；设备层用 `FakeTransport`、替身传输类与桩 `write_report` 覆盖报文序列 | ✅ CI 已强制（ubuntu + windows × Py 3.10/3.12/3.13 + black + 打包）；真机路径只能靠 `tools/check_device.py` / `verify_v11.py` / `verify_v13.py` / `gui_check.py`（40 项无人值守 GUI 自检） |
 | exe 体积 | 72 MB（含 ffmpeg + numpy） | 提供 Lite 版（无视频，约 40 MB）；或把视频解码拆成可选插件 |
 | 首启动速度 | 单文件解包 1–2 s | 提供 one-folder 版本；或按需导入 imageio |
 | 类型与风格 | `black` 100 列 + `ruff`（`pyproject.toml` 共享配置，E4/E7/E9/F/W/I/UP/B 规则）全绿 | ✅ CI 已强制（`lint (black + ruff)` job） |
@@ -195,7 +195,7 @@ v1.4.0 先落地了「平台化」里不依赖硬件的那一半：插件参数�
 3. **~~v1.2 传感器与图表~~ 已完成**——23 项指标 + 折线图 + 环形仪表盘，屏幕能表达信息了。
 4. **~~v1.2 的可视化编辑器~~ 已完成（v1.3）**——画布拖动 / 手柄缩放 / 吸附 / 多选 + 撤销重做，这是"自己做画面"的瓶颈。
 5. **E2 开机图真机验证**——代码已就位（`Control.upload_file`），成功的话是最有传播力的功能。
-6. **v1.4 Linux + LG700**——传输层与设备表都已就位，只差真机与 udev。
+6. **v1.4 Linux + LG700**——Linux 端到端已接线（`Screen`/`Control` 按平台分派到 `/dev/hidrawN`），剩下真机回归与 udev 实测；LG700 只差硬件。
 
 **立即可开工的 Top 5（都是低风险、高感知）**：
 ① ~~系统托盘~~ ✅　② ~~工程轮播~~ ✅　③ ~~可视化拖动编辑~~ ✅　④ ~~传感器温度图层~~ ✅　⑤ 新版截图/GIF 演示（放 README 顶部）

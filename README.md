@@ -305,7 +305,7 @@ HydroHUD/
 ├── packaging/linux/  udev 规则、安装脚本、桌面入口
 ├── ROADMAP.md        后续版本规划与待验证实验
 ├── AGENTS.md         给编码 agent 的移植与扩展说明书
-├── tests/            pytest 用例（928 项，全部纯软件，无需硬件）
+├── tests/            pytest 用例（944 项，全部纯软件，无需硬件）
 ├── preview/          预设 / 背景 / v1.3 新能力渲染预览图（contact-sheet.png 是总览）
 ├── examples/         示例工程 .hud.json + 示例插件 + Home Assistant 集成包
 ├── assets/           图标、界面截图
