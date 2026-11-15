@@ -38,6 +38,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+from hydrohud import render  # noqa: E402
 from hydrohud.render import (  # noqa: E402
     SCREEN_H,
     SCREEN_W,
@@ -112,6 +113,30 @@ def test_load_font_supports_chinese() -> None:
     assert font is not None
     # 中文字体应当有非零尺寸（内置位图字体也会有，这里只验证不抛异常）
     assert font.getlength("中文 42% °")
+
+
+def test_font_lookup_walks_into_vendor_subdirectories(tmp_path) -> None:
+    """Linux 把字体放在 truetype/noto/ 这类子目录里，查找要能进一层。"""
+    nested = tmp_path / "truetype" / "noto"
+    nested.mkdir(parents=True)
+    target = nested / "myfont.ttf"
+    target.write_bytes(b"\x00")
+    assert render._find_font_file(str(tmp_path), "myfont.ttf") == str(target)
+
+
+def test_font_lookup_returns_none_for_missing_files_and_dirs(tmp_path) -> None:
+    assert render._find_font_file(str(tmp_path), "nope.ttf") is None
+    assert render._find_font_file(str(tmp_path / "missing"), "nope.ttf") is None
+
+
+def test_font_directories_follow_the_platform(monkeypatch) -> None:
+    monkeypatch.setattr(render.sys, "platform", "linux")
+    linux_dirs = render._font_dirs()
+    assert "/usr/share/fonts" in linux_dirs
+    monkeypatch.setattr(render.sys, "platform", "darwin")
+    assert "/System/Library/Fonts" in render._font_dirs()
+    monkeypatch.setattr(render.sys, "platform", "win32")
+    assert any("Fonts" in directory for directory in render._font_dirs())
 
 
 # ------------------------------------------------------------------ 容错

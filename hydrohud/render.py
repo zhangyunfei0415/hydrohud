@@ -56,6 +56,7 @@ import json
 import math
 import os
 import re
+import sys
 import threading
 from collections import OrderedDict
 from typing import Any
@@ -90,11 +91,28 @@ _VALID_FITS = frozenset(("crop", "fit", "stretch"))
 _SHADOW_OFFSET = 3
 _SHADOW_COLOR = (0, 0, 0)
 
+
 # ------------------------------------------------------------------ 字体
-_FONT_DIRS = [
-    os.path.join(os.environ.get("WINDIR") or r"C:\Windows", "Fonts"),
-    os.path.join(os.environ.get("SystemRoot") or r"C:\Windows", "Fonts"),
-]
+def _font_dirs() -> list[str]:
+    """按平台列出字体目录：Windows 系统字体、macOS 字体库、Linux 常见字体路径。"""
+    if sys.platform == "win32":
+        return [
+            os.path.join(os.environ.get("WINDIR") or r"C:\Windows", "Fonts"),
+            os.path.join(os.environ.get("SystemRoot") or r"C:\Windows", "Fonts"),
+        ]
+    if sys.platform == "darwin":
+        return ["/System/Library/Fonts", "/Library/Fonts", os.path.expanduser("~/Library/Fonts")]
+    home = os.path.expanduser("~")
+    return [
+        "/usr/share/fonts",
+        "/usr/local/share/fonts",
+        os.path.join(home, ".local", "share", "fonts"),
+        os.path.join(home, ".fonts"),
+    ]
+
+
+_FONT_DIRS = _font_dirs()
+# 候选字体按「中文覆盖 → 拉丁」排序；每项可以是字体文件名，也可以是字体目录下的相对路径。
 _BOLD_FONTS = (
     "msyhbd.ttc",  # 微软雅黑 Bold，中文 + °/% 覆盖最好
     "msyh.ttc",
@@ -102,6 +120,15 @@ _BOLD_FONTS = (
     "segoeuib.ttf",
     "arialbd.ttf",
     "simhei.ttf",
+    # Linux / macOS 常见中文字体
+    "notosanscjk-bold.ttc",
+    "NotoSansCJK-Bold.ttc",
+    "NotoSansSC-Bold.otf",
+    "SourceHanSansSC-Bold.otf",
+    "wqy-microhei.ttc",
+    "PingFang.ttc",
+    "Hiragino Sans GB.ttc",
+    "DejaVuSans-Bold.ttf",
 )
 _REGULAR_FONTS = (
     "msyh.ttc",  # 微软雅黑
@@ -109,10 +136,39 @@ _REGULAR_FONTS = (
     "segoeui.ttf",
     "arial.ttf",
     "simhei.ttf",
+    # Linux / macOS 常见中文字体
+    "notosanscjk-regular.ttc",
+    "NotoSansCJK-Regular.ttc",
+    "NotoSansSC-Regular.otf",
+    "SourceHanSansSC-Regular.otf",
+    "wqy-microhei.ttc",
+    "PingFang.ttc",
+    "Hiragino Sans GB.ttc",
+    "DejaVuSans.ttf",
 )
 
 _font_cache: dict[tuple[int, bool], ImageFont.ImageFont] = {}
 _color_cache: dict[str, tuple[int, int, int]] = {}
+
+
+def _find_font_file(directory: str, name: str) -> str | None:
+    """在字体目录里找一个字体文件。
+
+    Windows 与 macOS 的字体基本平铺在目录下，Linux 则按厂商/家族分子目录
+    （``/usr/share/fonts/truetype/noto/``），所以先找直接路径，再递归找一层。
+    """
+    direct = os.path.join(directory, name)
+    if os.path.isfile(direct):
+        return direct
+    if not os.path.isdir(directory):
+        return None
+    try:
+        for root, _dirs, files in os.walk(directory):
+            if name in files:
+                return os.path.join(root, name)
+    except OSError:  # 权限不足的字体目录直接跳过
+        return None
+    return None
 
 
 def load_font(size: int, bold: bool = False) -> ImageFont.ImageFont:
@@ -135,8 +191,8 @@ def load_font(size: int, bold: bool = False) -> ImageFont.ImageFont:
     other = _REGULAR_FONTS if bold else _BOLD_FONTS
     for name in candidates + other:
         for directory in _FONT_DIRS:
-            path = os.path.join(directory, name)
-            if not os.path.isfile(path):
+            path = _find_font_file(directory, name)
+            if path is None:
                 continue
             try:
                 font = ImageFont.truetype(path, size)

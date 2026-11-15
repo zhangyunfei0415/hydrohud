@@ -212,7 +212,7 @@ IMG_FILETYPES = [
     ("视频", "*.mp4 *.avi *.webm *.mov *.mkv"),
     ("所有文件", "*.*"),
 ]
-PROJECT_FILETYPES = [("LG600 项目", "*.hud.json"), ("JSON 文件", "*.json"), ("所有文件", "*.*")]
+PROJECT_FILETYPES = [("HydroHUD 项目", "*.hud.json"), ("JSON 文件", "*.json"), ("所有文件", "*.*")]
 
 try:  # Pillow 12 里 LANCZOS 位于 Resampling 下
     _RESAMPLE = Image.Resampling.LANCZOS
@@ -237,8 +237,17 @@ _PIL_FONT_CANDIDATES = (
 
 @lru_cache(maxsize=40)
 def _pil_font(size: int, bold: bool = False) -> Any:
-    """加载可显示中文的 TrueType 字体，失败时退回 Pillow 内置位图字体。"""
+    """加载可显示中文的 TrueType 字体，失败时退回 Pillow 内置位图字体。
+
+    渲染引擎可用时直接借它的跨平台字体查找（Windows 微软雅黑 / Linux Noto CJK /
+    macOS 苹方），否则退回本模块的 Windows 字体候选。
+    """
     size = max(8, int(size))
+    if render_mod is not None and hasattr(render_mod, "load_font"):
+        try:
+            return render_mod.load_font(size, bold)
+        except Exception:  # 字体加载失败只影响占位图观感
+            pass
     candidates = _PIL_FONT_CANDIDATES
     if bold:
         candidates = (r"C:\Windows\Fonts\msyhbd.ttc", r"C:\Windows\Fonts\msyh.ttc") + candidates[2:]
@@ -289,6 +298,29 @@ def _placeholder_image(lines: tuple[str, ...], side: int = SCREEN_SIZE) -> Image
             y += side * 0.055
     draw.text((side - 14, side - 14), "HydroHUD", font=body_font, fill="#334155", anchor="rb")
     return image
+
+
+def _device_name_line() -> str:
+    """设备卡上的一行型号说明：优先用设备表里的真实型号，缺失时回落到 LG600。"""
+    spec = None
+    if device_mod is not None and hasattr(device_mod, "detected_spec"):
+        try:
+            spec = device_mod.detected_spec()
+        except Exception:  # 设备表查询失败不该影响界面绘制
+            spec = None
+    if spec is None:
+        return "TCOMAS LG600 · 1A2C:1520"
+    return f"{spec.label} · {spec.vendor_id:04X}:{spec.product_id:04X}"
+
+
+def _device_missing_line() -> str:
+    """没检测到设备时的提示：把用户该做的事写清楚，并按平台给不同的排查方向。"""
+    base = (
+        "接口：未找到 TCOMAS 水冷屏（1A2C:1520）\n请确认屏幕 USB 已连接并上电，然后点「检测设备」。"
+    )
+    if sys.platform != "win32":
+        base += "\nLinux 还需安装 packaging/linux/ 里的 udev 规则（见 docs/LINUX.md）。"
+    return base
 
 
 def make_placeholder(message: str) -> Image.Image:
@@ -847,6 +879,7 @@ class App(tk.Tk):
         self._preview_render_label: tk.Label | None = None
         self._device_reply: tk.Label | None = None
         self._dev_iface_label: tk.Label | None = None
+        self._device_name_label: tk.Label | None = None
         self._device_hint: tk.Label | None = None
         self._tips_card: tk.Frame | None = None
         self._tips_visible = True
@@ -1355,9 +1388,8 @@ class App(tk.Tk):
             body, text="● 未连接", bg=CARD, fg=MUTED, font=(FONT_FAMILY, 11, "bold"), anchor="w"
         )
         self._conn_label.pack(fill="x")
-        self._label(body, "TCOMAS LG600 · 1A2C:1520", size=9, color=TEXT).pack(
-            fill="x", pady=(4, 0)
-        )
+        self._device_name_label = self._label(body, _device_name_line(), size=9, color=TEXT)
+        self._device_name_label.pack(fill="x", pady=(4, 0))
         self._dev_iface_label = self._label(body, "接口：尚未检测", size=9, color=MUTED, wrap=224)
         self._dev_iface_label.pack(fill="x", pady=(2, 8))
 
@@ -4325,12 +4357,10 @@ class App(tk.Tk):
         if not devices:
             self._set_connection("● 未检测到设备", MUTED)
             if self._dev_iface_label is not None:
-                self._dev_iface_label.configure(
-                    text="接口：未找到 1A2C:1520\n请确认屏幕 USB 已连接并上电，然后点「检测设备」。"
-                )
+                self._dev_iface_label.configure(text=_device_missing_line())
             if self._device_hint is not None:
                 self._device_hint.configure(text=RECONNECT_HINT)
-            self._set_status("未检测到 TCOMAS LG600（1A2C:1520）", "warn")
+            self._set_status("未检测到 TCOMAS 水冷屏（1A2C:1520）", "warn")
             return
         by_role = {item.get("role"): item for item in devices if isinstance(item, dict)}
         image = by_role.get("image")
@@ -4346,9 +4376,11 @@ class App(tk.Tk):
             parts.append(f"发现 {len(devices)} 个 HID 集合")
         if self._dev_iface_label is not None:
             self._dev_iface_label.configure(text="接口：" + " · ".join(parts))
+        if self._device_name_label is not None:
+            self._device_name_label.configure(text=_device_name_line())
         if image and control:
             self._set_connection("● 设备就绪（未连接）", ACCENT)
-            self._set_status("已检测到 TCOMAS LG600，可以调节背光或开始推送", "ok")
+            self._set_status("已检测到水冷屏，可以调节背光或开始推送", "ok")
         else:
             self._set_connection("● 设备接口不完整", WARN)
             self._set_status(
