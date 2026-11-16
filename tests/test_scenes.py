@@ -194,10 +194,10 @@ def test_unknown_layer_type_is_dropped() -> None:
 
 
 def test_presets_are_complete_and_normalized() -> None:
-    """11 个预设全部可规范化，且至少各有一个时钟/指标类图层。"""
+    """12 个预设全部可规范化，且至少各有一个时钟/指标类图层。"""
     presets = scenes.preset_scenes()
-    assert len(presets) == 11
-    for name in ("硬件温度", "性能曲线", "极客面板"):
+    assert len(presets) == 12
+    for name in ("硬件温度", "性能曲线", "极客面板", "Aurora 仪表盘"):
         assert name in presets
     for name, scene in presets.items():
         assert scene["name"] == name
@@ -300,6 +300,66 @@ def test_plugin_layer_drops_unserializable_fields(monkeypatch: pytest.MonkeyPatc
     assert "nan" not in layer
     assert layer["ok"] == {"a": 1}
     json.dumps(scene)  # 不抛即合格
+
+
+def test_dashboard_layer_normalizes_with_defaults() -> None:
+    """dashboard 的字段白名单：缺省值齐全，非法值被夹回合法区间。"""
+    scene = scenes.normalize_scene({"layers": [{"type": "dashboard"}]})
+    layer = scene["layers"][0]
+    assert layer["type"] == "dashboard"
+    assert layer["title"] == "AURORA"
+    assert layer["cpu_metric"] == "cpu" and layer["gpu_metric"] == "gpu"
+    assert layer["cpu_temp_metric"] == "cpu_temp"
+    assert layer["gpu_temp_metric"] == "gpu_temp"
+    assert layer["extras"] == list(scenes.DASHBOARD_DEFAULT_EXTRAS)
+    assert layer["show_header"] is True and layer["show_extras"] is True
+    assert layer["w"] == 0.92 and layer["h"] == 0.92
+    assert layer["visible"] is True
+
+
+def test_dashboard_layer_clamps_and_filters() -> None:
+    """越界尺寸夹回 0.2–1.0，非法指标名被过滤，未知字段不进场景。"""
+    scene = scenes.normalize_scene(
+        {
+            "layers": [
+                {
+                    "type": "dashboard",
+                    "w": 5,
+                    "h": -3,
+                    "cpu_metric": "sausage",
+                    "extras": ["gpu_power", "nope", "gpu_power", "gpu_clock"],
+                    "unknown_field": 1,
+                    "title": "",
+                }
+            ]
+        }
+    )
+    layer = scene["layers"][0]
+    assert layer["w"] == 1.0 and layer["h"] == 0.2
+    assert layer["cpu_metric"] == "cpu"
+    assert layer["extras"] == ["gpu_power", "gpu_clock"]
+    assert layer["title"] == "AURORA"
+    assert "unknown_field" not in layer
+
+
+def test_dashboard_extras_can_be_emptied() -> None:
+    """附加指标允许清空：显式空列表不会被默认值顶回来（「开关」语义）。"""
+    layer = scenes.normalize_scene({"layers": [{"type": "dashboard", "extras": []}]})["layers"][0]
+    assert layer["extras"] == []
+    # 拿到的场景再规范化一次仍然是空列表，幂等
+    again = scenes.normalize_scene({"layers": [layer]})["layers"][0]
+    assert again["extras"] == []
+
+
+def test_every_layer_type_carries_the_visible_flag() -> None:
+    """所有图层类型都有 visible，默认 True，且能被显式关掉。"""
+    for kind in scenes.LAYER_TYPES:
+        raw: dict = {"type": kind}
+        layer = scenes._norm_layer(raw)
+        assert layer is not None, f"{kind} 没有被规范化"
+        assert layer["visible"] is True
+        hidden = scenes._norm_layer({**raw, "visible": False})
+        assert hidden is not None and hidden["visible"] is False
 
 
 def test_unregistered_type_is_still_dropped(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -66,6 +66,7 @@ __all__ = [
     "LAYER_TYPE_LABELS",
     "WEATHER_FIELDS",
     "NOWPLAYING_FIELDS",
+    "DASHBOARD_DEFAULT_EXTRAS",
     "TICKER_DIRECTIONS",
     "QR_ERROR_LEVELS",
     "normalize_scene",
@@ -132,6 +133,7 @@ LAYER_TYPES: tuple[str, ...] = (
     "qrcode",
     "weather",
     "nowplaying",
+    "dashboard",
 )
 
 #: 图层类型的中文名。
@@ -150,6 +152,7 @@ LAYER_TYPE_LABELS: dict[str, str] = {
     "qrcode": "二维码",
     "weather": "天气",
     "nowplaying": "正在播放",
+    "dashboard": "性能仪表盘",
 }
 
 #: ``weather`` 图层可显示的字段。
@@ -157,6 +160,9 @@ WEATHER_FIELDS = ("temp", "feels", "humidity", "wind", "desc")
 
 #: ``nowplaying`` 图层可显示的字段。
 NOWPLAYING_FIELDS = ("title", "artist", "album")
+
+#: ``dashboard`` 图层默认显示的附加指标（功耗 / 频率这类"可开关"的信息）。
+DASHBOARD_DEFAULT_EXTRAS = ("gpu_power", "gpu_clock", "ram")
 
 #: ``sequence`` / ``ticker`` 等图层的子选项。
 TICKER_DIRECTIONS = ("left", "right")
@@ -274,8 +280,18 @@ def _as_fields(value: Any, allowed: tuple[str, ...], default: tuple[str, ...]) -
     return result
 
 
-def _as_metrics(value: Any, default: tuple[str, ...] = ("cpu", "ram"), limit: int = 8) -> list[str]:
-    """把任意字符串列表过滤成合法指标名（保持顺序、去重、截断到 ``limit``）。"""
+def _as_metrics(
+    value: Any,
+    default: tuple[str, ...] = ("cpu", "ram"),
+    limit: int = 8,
+    *,
+    allow_empty: bool = False,
+) -> list[str]:
+    """把任意字符串列表过滤成合法指标名（保持顺序、去重、截断到 ``limit``）。
+
+    ``allow_empty`` 为真时，显式传空列表就返回空列表（不回落 ``default``）：
+    仪表盘的附加指标行允许一项都不显示。
+    """
     result: list[str] = []
     if isinstance(value, str):
         items: tuple = (value,)
@@ -283,6 +299,8 @@ def _as_metrics(value: Any, default: tuple[str, ...] = ("cpu", "ram"), limit: in
         items = tuple(value)
     else:
         items = ()
+        if allow_empty:
+            return result
     for item in items:
         for part in _as_str(item).split(","):
             key = part.strip().lower()
@@ -290,7 +308,7 @@ def _as_metrics(value: Any, default: tuple[str, ...] = ("cpu", "ram"), limit: in
                 result.append(key)
             if len(result) >= limit:
                 return result
-    if not result:
+    if not result and not allow_empty:
         result = [key for key in default if key in _METRIC_SET][:limit]
     return result
 
@@ -348,6 +366,8 @@ def _norm_layer(layer: Any) -> dict | None:
         "x": _as_float(layer.get("x"), 0.5),
         "y": _as_float(layer.get("y"), 0.5),
         "anchor": _as_anchor(layer.get("anchor"), "center"),
+        # 所有图层共用：关掉后渲染层直接跳过，编辑时仍保留在图层面板里。
+        "visible": _as_bool(layer.get("visible"), True),
     }
 
     if kind == "text":
@@ -593,6 +613,40 @@ def _norm_layer(layer: Any) -> dict | None:
                 "placeholder": _as_str(layer.get("placeholder"), "未在播放") or "未在播放",
                 "scroll": _as_bool(layer.get("scroll"), False),
                 "speed": _clamp(_as_float(layer.get("speed"), 40.0), 5.0, 600.0),
+            }
+        )
+        return base
+
+    if kind == "dashboard":
+        base.update(
+            {
+                "type": "dashboard",
+                "title": _as_str(layer.get("title"), "AURORA") or "AURORA",
+                "cpu_metric": _as_metric(layer.get("cpu_metric"), "cpu"),
+                "gpu_metric": _as_metric(layer.get("gpu_metric"), "gpu"),
+                "cpu_temp_metric": _as_metric(layer.get("cpu_temp_metric"), "cpu_temp"),
+                "gpu_temp_metric": _as_metric(layer.get("gpu_temp_metric"), "gpu_temp"),
+                "extras": _as_metrics(
+                    layer.get("extras", DASHBOARD_DEFAULT_EXTRAS),
+                    DASHBOARD_DEFAULT_EXTRAS,
+                    limit=8,
+                    allow_empty=True,
+                ),
+                "w": _clamp(_as_float(layer.get("w"), 0.92), 0.2, 1.0),
+                "h": _clamp(_as_float(layer.get("h"), 0.92), 0.2, 1.0),
+                "cpu_color": _as_color(layer.get("cpu_color"), "#38BDF8"),
+                "gpu_color": _as_color(layer.get("gpu_color"), "#A78BFA"),
+                "accent": _as_color(layer.get("accent"), "#22D3EE"),
+                "bg": _as_color(layer.get("bg"), "#0F172A"),
+                "border": _as_color(layer.get("border"), "#1E293B"),
+                "text_color": _as_color(layer.get("text_color"), "#E2E8F0"),
+                "muted_color": _as_color(layer.get("muted_color"), "#94A3B8"),
+                "size": _as_size(layer.get("size"), 20),
+                "value_size": _as_size(layer.get("value_size"), 64),
+                "show_header": _as_bool(layer.get("show_header"), True),
+                "show_history": _as_bool(layer.get("show_history"), True),
+                "show_extras": _as_bool(layer.get("show_extras"), True),
+                "radius": _clamp(_as_float(layer.get("radius"), 0.5), 0.0, 1.0),
             }
         )
         return base
@@ -1117,6 +1171,28 @@ def preset_scenes() -> dict[str, dict]:
                 size=17,
                 color="#86EFAC",
                 shadow=False,
+            ),
+        ],
+    }
+
+    presets["Aurora 仪表盘"] = {
+        "name": "Aurora 仪表盘",
+        "background": {"type": "solid", "color": "#050A14"},
+        "tint": {"color": "#22D3EE", "alpha": 0.05},
+        "layers": [
+            _layer(
+                "dashboard",
+                x=0.5,
+                y=0.5,
+                w=0.94,
+                h=0.94,
+                title="AURORA",
+                extras=["gpu_power", "gpu_clock", "ram", "gpu_mem"],
+                cpu_color="#38BDF8",
+                gpu_color="#A78BFA",
+                accent="#22D3EE",
+                bg="#0B1220",
+                border="#1E293B",
             ),
         ],
     }

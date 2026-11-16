@@ -66,6 +66,7 @@ SLUGS = {
     "硬件温度": "hw-temp",
     "性能曲线": "perf-chart",
     "极客面板": "geek-panel",
+    "Aurora 仪表盘": "aurora-dash",
 }
 
 

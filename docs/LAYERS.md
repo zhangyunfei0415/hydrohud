@@ -8,6 +8,9 @@
 | `x` | number | `0.5` | 水平位置；`0` = 左边缘，`1` = 右边缘 |
 | `y` | number | `0.5` | 垂直位置；`0` = 上边缘，`1` = 下边缘 |
 | `anchor` | string | `"center"` | 内容相对 `(x, y)` 的锚点 |
+| `visible` | bool | `true` | 关掉后渲染层直接跳过这个图层，编辑时仍保留在图层面板里 |
+
+`visible` 是 v1.5 起所有图层通用的开关：改它不影响图层字段，只影响是否画进画面，所以可以放心用来做「临时藏起来对比效果」。
 
 `anchor` 可取：`center`、`top-left`、`top`（=`top-center`）、`top-right`、`bottom-left`、`bottom`（=`bottom-center`）、`bottom-right`、`left`（=`center-left`）、`right`（=`center-right`）。下划线写法（`top_left`）等价。
 
@@ -39,6 +42,7 @@
 | `qrcode` | 二维码 | 把 `data` 编码成二维码 | 含模板变量时 |
 | `weather` | 天气 | 当前天气文本 + 内置矢量图标 | 是 |
 | `nowplaying` | 正在播放 | 系统媒体会话的标题 / 作者 / 封面 | 是 |
+| `dashboard` | 性能仪表盘 | CPU / GPU 双英雄卡（占用率 + 温度 + 历史折线）+ 可开关的附加指标行 | 是 |
 
 颜色字段统一接受 `#RRGGBB`、`#RGB`（自动展开）与不带 `#` 的十六进制；大小写不敏感。
 
@@ -300,6 +304,38 @@
 ```json
 {"type": "nowplaying", "x": 0.5, "y": 0.75, "fields": ["title", "artist"], "show_cover": true, "cover_size": 0.22, "scroll": true}
 ```
+## dashboard
+一块自成一体的性能面板：顶部标题栏（左标题 + 右时钟），中间并排两张「英雄卡」显示 CPU 与 GPU 的占用率、温度和底部历史折线，下方是若干行附加指标（标签 + 迷你进度条 + 数值）。`(x, y)` 是整块卡片的锚点，`w` / `h` 是占屏比例。
+
+| 字段 | 类型 | 默认值 | 含义 |
+| --- | --- | --- | --- |
+| `title` | string | `"AURORA"` | 左上角标题 |
+| `cpu_metric` | string | `"cpu"` | 左卡大号主数值用的指标 |
+| `gpu_metric` | string | `"gpu"` | 右卡大号主数值用的指标 |
+| `cpu_temp_metric` | string | `"cpu_temp"` | 左卡温度行的指标 |
+| `gpu_temp_metric` | string | `"gpu_temp"` | 右卡温度行的指标 |
+| `extras` | string[] | `["gpu_power", "gpu_clock", "ram"]` | 附加指标行；**这是「功耗 / 频率可开关」的数据层**，留空 `[]` 就只显示英雄卡 |
+| `w` | number | `0.92` | 卡片宽度，屏幕比例（0.2–1.0） |
+| `h` | number | `0.92` | 卡片高度，屏幕比例（0.2–1.0） |
+| `cpu_color` | string | `"#38BDF8"` | CPU 卡主色 |
+| `gpu_color` | string | `"#A78BFA"` | GPU 卡主色 |
+| `accent` | string | `"#22D3EE"` | 顶部细线与强调色 |
+| `bg` | string | `"#0F172A"` | 卡片底色 |
+| `border` | string | `"#1E293B"` | 卡片描边色 |
+| `text_color` | string | `"#E2E8F0"` | 主文字色 |
+| `muted_color` | string | `"#94A3B8"` | 次要文字色 |
+| `size` | int | `20` | 标题基准字号 |
+| `value_size` | int | `64` | 英雄卡大号数值的字号上限（实际会按卡片尺寸收） |
+| `show_header` | bool | `true` | 是否画标题栏（标题 + 时钟 + 分隔线） |
+| `show_history` | bool | `true` | 是否画英雄卡底部历史折线 |
+| `show_extras` | bool | `true` | 是否画附加指标行 |
+| `radius` | number | `0.5` | 圆角程度（0–1，按卡片短边百分比） |
+
+```json
+{"type": "dashboard", "x": 0.5, "y": 0.5, "w": 0.94, "h": 0.94, "title": "AURORA", "extras": ["gpu_power", "gpu_clock", "ram", "gpu_mem"]}
+```
+
+`extras` 里的指标在本机读不到时画「—」，不会崩；界面里勾选附加指标时会自动把采不到值的项标成「本机不可用」。中等性能机器上单帧渲染约 1 ms（首次含字体加载约 58 ms）。
 ## 背景
 `background` 描述整屏底图，与 `tint`（整屏叠色）同级。
 
@@ -361,6 +397,8 @@
 | `cpu_cores` | CPU 核心数 | 核 |
 
 指标数据来自 `hydrohud/sensors.py`；某项后端不可用时显示「—」。不在表内的 id 会被 `fields` / `items` 过滤掉。
+
+`cpu_temp` 的取值顺序：LHM / OHM 共享内存 → HWiNFO SM2 共享内存 → **ACPI 热区兜底**（`MSAcpi_ThermalZoneTemperature`，取最热的一个热区）。前两者读的是 CPU 核心温度；ACPI 热区贴的是主板，只是量级参考，界面里会在指标卡下方注明「CPU 温度取自 ACPI 主板传感器」。`cpu_power` 与 `fan` 只能来自共享内存，没有 ACPI 兜底。
 
 ## 注意事项
 - `weather` 需要网络（Open-Meteo，无需 key）；离线或请求失败时继续显示上次缓存，从未成功时显示「天气 —」。

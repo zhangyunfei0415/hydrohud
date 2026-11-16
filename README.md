@@ -45,7 +45,7 @@
 | --- | --- |
 | **画面来源** | 纯色背景；图片（JPG/PNG/WebP/BMP）；GIF / 动态 WebP；视频（MP4/AVI/MKV/WebM，需 imageio-ffmpeg）；**屏幕捕获**（把虚拟桌面的任意区域按 5 fps 镜像到屏上） |
 | **系统状态**（v1.2） | 23 项指标：CPU / 内存占用、CPU 频率与温度、GPU 占用 / 温度 / 显存 / 功耗 / 风扇 / 频率、磁盘占用与读写速率、网络上下行、运行时间、风扇转速、核心数。GPU 走 NVML，CPU 温度可读 LibreHardwareMonitor / HWiNFO 共享内存，缺失时显示「—」 |
-| **可叠加图层** | **14 类**：文字（含 `{cpu}` `{gpu_temp}` `{time}` 等模板变量）、时钟、状态文字、进度条、折线图、环形仪表盘、图片贴图、**温度计**、**倒计时/纪念日**、**滚动文字**、**图片序列（帧动画）**、**二维码**、**天气**、**正在播放** |
+| **可叠加图层** | **15 类**：文字（含 `{cpu}` `{gpu_temp}` `{time}` 等模板变量）、时钟、状态文字、进度条、折线图、环形仪表盘、图片贴图、**温度计**、**倒计时/纪念日**、**滚动文字**、**图片序列（帧动画）**、**二维码**、**天气**、**正在播放**、**性能仪表盘**；所有图层都能单独隐藏 |
 | **可视化编辑器**（v1.3） | 在预览画布上直接拖动 / 缩放图层：8 个手柄、1/8 网格与中心线吸附、相邻图层边缘吸附、Ctrl 多选整体移动、方向键微移；配合撤销 / 重做（`Ctrl+Z` / `Ctrl+Y`，拖动滑块合并为一步） |
 | **实时预览** | 480×480 所见即所得预览，动态内容 10–15 fps 刷新，显示当前单帧 JPEG 体积（超限标红） |
 | **推流** | 10 / 20 / 30 / 60 fps 可选，静态画面自动按 2 s 间隔重推（固件看门狗要求），支持停止与热更新（边改边播） |
@@ -101,7 +101,7 @@ python -m hydrohud --autostream --project "D:\我的场景.hud.json"
 │  连接状态      │   ┌──────────────┐   │  预设场景列表          │
 │  亮度滑块      │   │              │   │  背景：纯色/图片/GIF/  │
 │  开/关屏幕     │   │   实时画面    │   │        视频/屏幕捕获   │
-│  方向下拉      │   │              │   │  图层：14 类 + 插件按钮 │
+│  方向下拉      │   │              │   │  图层：15 类 + 插件按钮 │
 │  读取设备状态  │   └──────────────┘   │  ─────────            │
 │               │  FPS · 帧体积  字节   │  画布拖动 / 手柄缩放    │
 ├───────────────┴──────────────────────┴───────────────────────┤
@@ -123,7 +123,7 @@ python -m hydrohud --autostream --project "D:\我的场景.hud.json"
 | **多选 / 微调** | `Ctrl+单击` 加选，多选时按整体偏移；方向键微移 1 px，`Shift+方向键` 8 px |
 | **画布编辑开关** | `Ctrl+E` 进入 / 退出画布编辑模式（退出后画布只做预览） |
 | **撤销 / 重做** | `Ctrl+Z` / `Ctrl+Y`；拖滑块、拖图层的连续操作会合并成一步，不会刷出上百条历史 |
-| **14 类图层** | 右栏「图层」→ 「添加图层…」下拉选，字段说明见 [docs/LAYERS.md](docs/LAYERS.md) |
+| **15 类图层** | 右栏「图层」→ 「添加图层…」下拉选，字段说明见 [docs/LAYERS.md](docs/LAYERS.md) |
 | **主题包** | 「主题包 → 导出 / 导入主题包…」，`.hudpack` = 工程 + 引用素材的 zip，可直接发给别人 |
 | **官方素材** | 「主题包 → 导入官方素材到素材库」，扫描已装的 TCOMAS 软件里的 GIF / 图片 |
 | **插件** | 往 `%APPDATA%\HydroHUD\plugins` 丢一个 `.py`，点「插件 → 重载图层插件」，图层页签会出现对应按钮；插件声明了 `params` 后，编辑器会自动生成滑块 / 数字框 / 勾选框 / 下拉 / 取色器。写法见 [docs/PLUGINS.md](docs/PLUGINS.md) |
@@ -141,6 +141,21 @@ python -m hydrohud --autostream --project "D:\我的场景.hud.json"
 | **Home Assistant** | [examples/homeassistant/](examples/homeassistant/) 里是可直接用的 REST 传感器 + 服务定义 |
 | **Linux 打包资源** | `packaging/linux/` 有 udev 规则、安装脚本、`.desktop` 入口，装法见 [docs/LINUX.md](docs/LINUX.md) |
 | **Linux 推流接线** | `Screen` / `Control` 按平台选后端：Windows 走 `hid.dll`，Linux 走 `/dev/hidrawN`；帧编码与命令下发是同一份代码 |
+
+## Aurora 性能面板（v1.5）
+
+v1.5 加了一块**自成一体的性能仪表盘**，顺手把整个界面换成同一套视觉语言。它同时回答两个问题：屏幕上该常驻什么，程序里该一眼看到什么。
+
+| 功能 | 说明 |
+| --- | --- |
+| **性能仪表盘图层** | 新增第 15 类图层 `dashboard`：顶部标题栏 + 并排 CPU / GPU 双英雄卡（大号占用率、温度、底部历史折线）+ 下方附加指标行（标签 / 迷你进度条 / 数值）。480 屏上单帧约 1 ms，整块卡可以按屏占比缩放和四角对齐 |
+| **功耗 / 频率可开关** | 英雄卡（温度 + 占用率）始终常驻；功耗、频率、内存、显存等作为「附加指标」，在图层面板里逐个勾选，或直接用左栏的选择框一键收起。本机采不到值的指标在选择器里置灰并标「本机不可用」 |
+| **图层可见性** | 所有 15 类图层新增 `visible` 字段，关掉后渲染层直接跳过、编辑器和工程文件里仍保留，用来对比效果最方便 |
+| **Aurora 界面** | 左侧图标栏、顶栏 AURORA 徽章与三个状态 chip（版本 / 帧数 / 设备）、卡片顶部青紫渐变细线、左栏「实时指标」卡（CPU / GPU 进度条 + 折线、双温度、附加指标开关）、预览卡下方的渲染耗时 / 实际帧率 / 累计帧数三格 |
+| **ACPI 温度兜底** | 没装 LibreHardwareMonitor 的机器以前 `cpu_temp` 恒为「—」；现在 LHM / HWiNFO 共享内存都拿不到时会回落到 ACPI 热区（`MSAcpi_ThermalZoneTemperature`，后台线程 + 5 s 缓存，不阻塞采样），并注明这是主板传感器而非 CPU 核心温度 |
+| **预设** | 新增第 12 个预设「Aurora 仪表盘」，装上即可看到上面那块面板 |
+
+想立刻看效果：右栏「预设场景」里点「Aurora 仪表盘」，或在「图层」页签点「＋ 性能仪表盘」自己摆位。
 
 ## 快捷键 · 托盘 · 轮播（v1.1）
 
@@ -273,12 +288,12 @@ powershell -ExecutionPolicy Bypass -File build.ps1 -Clean
 ```
 HydroHUD/
 ├── hydrohud/
-│   ├── app.py        Tkinter 界面（14 类图层编辑器、画布拖动、托盘 / 热键 / 轮播接线）
-│   ├── render.py     场景 → 480×480 图像（14 类图层、5 类背景、缓存、插件分发）
+│   ├── app.py        Tkinter 界面（Aurora 换肤、实时指标卡、15 类图层编辑器、画布拖动、托盘 / 热键 / 轮播接线）
+│   ├── render.py     场景 → 480×480 图像（15 类图层、5 类背景、缓存、插件分发）
 │   ├── device.py     USB HID 传输 + JPEG 编码 + 报文分帧 + 设备表查询（无 GUI 依赖）
 │   ├── devices.py    设备表（VID/PID、报文长度、分包预算、是否已验证）
 │   ├── transport.py  传输抽象 + FakeTransport（测试）+ Linux hidraw 实现
-│   ├── scenes.py     场景 schema、11 个预设、工程文件读写
+│   ├── scenes.py     场景 schema、12 个预设、工程文件读写
 │   ├── editor.py     画布编辑器（命中测试 / 拖动 / 缩放 / 吸附，几何部分为纯函数）
 │   ├── history.py    撤销 / 重做栈（深拷贝快照、拖动合并、脏标记）
 │   ├── sensors.py    系统指标采集中心（23 项，NVML / 共享内存 / ctypes，含历史缓冲）
@@ -300,14 +315,14 @@ HydroHUD/
 │   ├── diagnostics.py 崩溃日志
 │   └── __main__.py   python -m hydrohud 入口
 ├── docs/PROTOCOL.md  屏幕 HID 协议逆向记录（含 flash 上传子协议）
-├── docs/LAYERS.md    14 类图层与背景的字段参考
+├── docs/LAYERS.md    15 类图层与背景的字段参考
 ├── docs/PLUGINS.md   插件协议：PLUGIN 字典、params 参数声明、隔离与权限
 ├── docs/AUTOMATION.md 本地 API / hudctl / 主题包
 ├── docs/LINUX.md     Linux 传输层、udev 规则与现状
 ├── packaging/linux/  udev 规则、安装脚本、桌面入口
 ├── ROADMAP.md        后续版本规划与待验证实验
 ├── AGENTS.md         给编码 agent 的移植与扩展说明书
-├── tests/            pytest 用例（960 项，全部纯软件，无需硬件）
+├── tests/            pytest 用例（981 项，全部纯软件，无需硬件）
 ├── preview/          预设 / 背景 / v1.3 新能力渲染预览图（contact-sheet.png 是总览）
 ├── examples/         示例工程 .hud.json + 示例插件 + Home Assistant 集成包
 ├── assets/           图标、界面截图
@@ -326,7 +341,7 @@ HydroHUD/
 - **Windows 为完整支持平台**：推流、设备控制、托盘、热键只在 Windows 上验证过。Linux 的 hidraw 后端已经接通（`Screen` / `Control` 按平台分派），udev 规则、桌面入口与安装脚本见 [docs/LINUX.md](docs/LINUX.md)，但 **Linux 真机推流尚未回归**；macOS 未开始。
 - 仅 LG600（PID 1520）经过真机验证。LG700（1A2C:151C）已登记设备表，协议推定与 LG600 相同但未实测（见 [docs/PROTOCOL.md](docs/PROTOCOL.md)）。
 - 单帧 46920 字节上限：质量 100 的照片（约 42–46 KB，正好吃满预算）能原样上屏；只有逐像素噪点这种病态素材才会被迫降质量。
-- CPU 温度 / CPU 功耗 / 风扇转速依赖第三方监控软件的共享内存（LHM / HWiNFO），没装就显示「—」。
+- CPU 温度：优先读 LHM / HWiNFO 共享内存（核心温度），都没有时回落到 ACPI 热区（主板传感器，量级参考，界面里会注明来源）。CPU 功耗与风扇转速只能来自共享内存，没装就显示「—」。
 - 折线图历史只存在于内存（默认 120 个采样点，0.5 s 一个 ≈ 1 分钟），重启后重新累积。
 - 视频需要 ffmpeg：`pip install imageio imageio-ffmpeg`，打包版已内置。
 - 「正在播放」需要 `pip install winsdk`（可选依赖，不在 requirements.txt 里）；未安装时该图层显示占位文案，其余功能不受影响。
@@ -337,7 +352,7 @@ HydroHUD/
 
 ## 路线图
 
-未来规划（v1.1 顺手 ✅ → v1.2 内容 ✅ → v1.3 编辑 ✅ → v1.4 平台化 ✅ → v2.0 社区生态）见
+未来规划（v1.1 顺手 ✅ → v1.2 内容 ✅ → v1.3 编辑 ✅ → v1.4 平台化 ✅ → v1.5 Aurora ✅ → v2.0 社区生态）见
 [ROADMAP.md](ROADMAP.md)，其中列了各版本的功能清单、工作量、需要先用真机验证的实验
 （E1/E5 已在真机做完：46 包画质上限成立，640×640 会让设备掉线；flash 上传换开机图的 E2 已实现代码、待真机验证）。
 

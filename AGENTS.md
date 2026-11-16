@@ -42,8 +42,8 @@ HydroHUD is an open-source controller for the **TCOMAS LG600** AIO liquid cooler
 | Module | Owns | Never touches |
 | --- | --- | --- |
 | `device.py` | HID enumeration, packet framing, JPEG encoding, `Screen`, `Control` (incl. flash upload), vendor-process handling, device-table lookup (`detected_spec`/`describe_panel`) | Tk, scenes, sensors |
-| `render.py` | scene dict → `PIL.Image`; layer painters (14 types), background painters (solid/image/gif/video/**capture**), LRU caches, plugin dispatch for unknown layer types | device, Tk |
-| `scenes.py` | schema defaults/validation (`normalize_scene`), 11 presets, `.hud.json` load/save | device, Tk |
+| `render.py` | scene dict → `PIL.Image`; layer painters (15 types), background painters (solid/image/gif/video/**capture**), LRU caches, plugin dispatch for unknown layer types | device, Tk |
+| `scenes.py` | schema defaults/validation (`normalize_scene`), 12 presets, `.hud.json` load/save | device, Tk |
 | `sensors.py` | 23 metrics, `SensorHub` (0.5 s throttle + 120-sample history), NVML / Win32 / LHM-shared-memory backends | Tk, device |
 | `app.py` | everything UI: layout, editor, stream loop with absolute-deadline pacing, tray/hotkeys/playlist wiring, API `Host` adapter, history/canvas-editor glue | protocol details |
 | `history.py` | undo/redo stack (deep-copied snapshots, coalescing, dirty tracking) | Tk, device |
@@ -62,6 +62,8 @@ HydroHUD is an open-source controller for the **TCOMAS LG600** AIO liquid cooler
 **Data flow for a new layer type:** `scenes.py` (defaults + validation) → `render.py` (`_draw_*_layer`,
 `_render_layer` dispatch, `_DYNAMIC_TYPES`, cache signature) → `app.py` (`layer_label`, `_add_layer` defaults,
 `_rebuild_layer_editor` controls) → `tests/`. Layer field reference lives in [docs/LAYERS.md](docs/LAYERS.md).
+Every layer also carries the shared `visible` flag: `render._layer_overlay` returns a fully transparent overlay
+for a hidden layer, so hiding keeps the layer in the editor and the file while removing it from the frame.
 
 ## 3. Protocol cheat sheet
 
@@ -135,7 +137,7 @@ Then in `hydrohud/render.py`: write `_draw_thermometer_layer(draw, layer, values
 ## 6. Commands
 
 ```powershell
-C:\Python314\python.exe -m pytest tests -q          # 960 tests, all pure-software
+C:\Python314\python.exe -m pytest tests -q          # 981 tests, all pure-software
 C:\Python314\python.exe -m black --line-length 100 hydrohud tests tools
 C:\Python314\python.exe -m ruff check hydrohud tests tools       # pyproject.toml holds the shared config
 C:\Python314\python.exe -m hydrohud                 # run from source
@@ -144,7 +146,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1 -Clean   # → dist\HydroHUD.
 C:\Python314\python.exe tools\check_device.py       # real hardware self-check
 C:\Python314\python.exe tools\verify_v11.py         # real-device fps regression (v1.1 scene)
 C:\Python314\python.exe -X utf8 tools\verify_v13.py  # real-device v1.3 scene: static + capture rounds
-C:\Python314\python.exe -X utf8 tools\gui_check.py  # headless GUI integration sweep (40 checks)
+C:\Python314\python.exe -X utf8 tools\gui_check.py  # headless GUI integration sweep (44 checks)
 C:\Python314\python.exe -X utf8 tools\render_previews.py    # regenerate preview/ + contact sheet
 C:\Python314\python.exe -X utf8 -m hydrohud.hudctl status   # CLI client for the local API (GUI must be running)
 C:\Python314\python.exe -X utf8 tools\build_docs.py --strict  # → build\docs-site\docs (site source tree)

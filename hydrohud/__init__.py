@@ -20,5 +20,5 @@ Run it with ``python -m hydrohud`` or the packaged ``HydroHUD.exe``.
 
 from __future__ import annotations
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 __all__ = ["__version__"]

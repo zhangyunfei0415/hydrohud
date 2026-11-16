@@ -343,6 +343,94 @@ def test_sysinfo_and_bars_update_without_error() -> None:
         _assert_screen(render_scene(scene, t))
 
 
+# ------------------------------------------------------------------ 仪表盘图层
+def _dashboard_scene(**overrides) -> dict:
+    layer = {"type": "dashboard", "x": 0.5, "y": 0.5, "w": 0.94, "h": 0.94}
+    layer.update(overrides)
+    return {
+        "background": {"type": "solid", "color": "#050A14"},
+        "layers": [layer],
+    }
+
+
+def test_dashboard_renders_hero_numbers_and_extras() -> None:
+    """CPU / GPU 双英雄卡是常驻信息：换 t 也要每帧重绘（不能冻结）。"""
+    scene = normalize_scene(_dashboard_scene())
+    for t in TIMELINE:
+        _assert_screen(render_scene(scene, t))
+    assert _distinct_colors(render_scene(scene, 0.0)) > 8
+
+
+def test_dashboard_extras_toggle_changes_the_frame() -> None:
+    """附加指标勾上/取消要真的改变画面（这就是「功耗/频率可开关」）。"""
+    clear_cache()
+    with_extras = normalize_scene(
+        _dashboard_scene(extras=["gpu_power", "gpu_clock", "ram", "gpu_mem"])
+    )
+    clear_cache()
+    without_extras = normalize_scene(_dashboard_scene(extras=[]))
+    first = render_scene(with_extras, 0.0).tobytes()
+    second = render_scene(without_extras, 0.0).tobytes()
+    assert first != second
+
+
+def test_dashboard_title_and_header_are_optional() -> None:
+    """关掉标题栏后画面顶部不该再有 AURORA 那块内容。"""
+    clear_cache()
+    with_header = normalize_scene(_dashboard_scene(show_header=True))
+    clear_cache()
+    without_header = normalize_scene(_dashboard_scene(show_header=False))
+    assert render_scene(with_header, 0.0).tobytes() != render_scene(without_header, 0.0).tobytes()
+
+
+def test_dashboard_tolerates_missing_hardware_metrics() -> None:
+    """本机没有 CPU 温度时画「—」而不是抛异常（很多机器读不到 cpu_temp）。"""
+    scene = normalize_scene(
+        _dashboard_scene(
+            cpu_metric="cpu_temp",
+            gpu_metric="gpu_temp",
+            cpu_temp_metric="cpu_power",
+            gpu_temp_metric="fan",
+            extras=["disk_read", "net_down"],
+        )
+    )
+    for t in TIMELINE:
+        _assert_screen(render_scene(scene, t))
+
+
+def test_dashboard_renders_at_odd_geometry() -> None:
+    """尺寸/位置越界或极小格子里也不抛异常。"""
+    for overrides in (
+        {"w": 0.2, "h": 0.2},
+        {"w": 1.0, "h": 1.0},
+        {"x": 0.0, "y": 0.0, "anchor": "top_left"},
+        {"x": 1.0, "y": 1.0, "anchor": "bottom_right"},
+    ):
+        scene = normalize_scene(_dashboard_scene(**overrides))
+        _assert_screen(render_scene(scene, 1.0))
+
+
+def test_visible_false_layer_is_skipped() -> None:
+    """visible=False 的图层完全不参与渲染：画面与「没有这个图层」一致。"""
+    background = {"type": "solid", "color": "#123456"}
+    hidden_scene = normalize_scene(
+        {
+            "background": background,
+            "layers": [{"type": "text", "text": "不该出现", "visible": False, "size": 60}],
+        }
+    )
+    empty_scene = normalize_scene({"background": background, "layers": []})
+    clear_cache()
+    assert render_scene(hidden_scene, 0.0).tobytes() == render_scene(empty_scene, 0.0).tobytes()
+
+
+def test_visible_false_dashboard_leaves_the_background_alone() -> None:
+    """隐藏仪表盘后只剩背景色，说明整层被跳过而不是画成半透明。"""
+    scene = normalize_scene(_dashboard_scene(visible=False))
+    image = render_scene(scene, 0.0)
+    assert _distinct_colors(image) <= 3
+
+
 # ------------------------------------------------------------------ 性能
 def test_performance_static_scene() -> None:
     scene = PRESETS["纯色标语"]

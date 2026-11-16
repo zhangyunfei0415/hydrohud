@@ -47,6 +47,7 @@ import ctypes
 import math
 import os
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -192,6 +193,23 @@ _DLL_CACHE: dict[str, Any] = {}
 _NO_PSUTIL_RATE = "psutil 不可用（无法计算速率）"
 
 _NO_SHARED_MEMORY = "未检测到硬件监控共享内存（LHM/OHM/HWiNFO 均不可用）"
+
+# ACPI 热区读数：没有 LHM/HWiNFO 时的兜底。查询走 PowerShell 子进程（约 0.3 s），
+# 因此放在后台线程刷新、只给采样线程读缓存，渲染路径不会被拖慢。
+_ACPI_THERMAL_TTL = 5.0
+_ACPI_THERMAL_TIMEOUT = 10.0
+_ACPI_THERMAL_COMMAND = (
+    "Get-CimInstance -Namespace root/WMI -ClassName MSAcpi_ThermalZoneTemperature "
+    "| Select-Object -ExpandProperty CurrentTemperature"
+)
+_ACPI_DESCRIPTION = "ACPI 热区（MSAcpi_ThermalZoneTemperature，主板传感器，不是 CPU 核心温度）"
+_ACPI_MIN_CELSIUS = 0.0
+_ACPI_MAX_CELSIUS = 120.0
+
+_acpi_lock = threading.Lock()
+_acpi_celsius: float | None = None
+_acpi_sampled_at = 0.0
+_acpi_refreshing = False
 
 
 # --------------------------------------------------------------------------- #
@@ -1262,7 +1280,11 @@ def _read_cores(state: _SampleState) -> float | None:
 
 
 def _read_thermal(state: _SampleState) -> dict[str, float | None]:
-    """CPU 温度 / CPU 功耗 / 风扇转速：只认 LHM/OHM 与 HWiNFO 共享内存。"""
+    """CPU 温度 / CPU 功耗 / 风扇转速。
+
+    温度先认 LHM/OHM 与 HWiNFO 共享内存（核心温度，最准）；都没有时回落到
+    ACPI 热区（主板温度，量级参考）。``cpu_power`` 与 ``fan`` 只能来自共享内存。
+    """
     values: dict[str, float | None] = {"cpu_temp": None, "cpu_power": None, "fan": None}
     readers = (
         (_read_lhm, "LibreHardwareMonitor/OpenHardwareMonitor 共享内存"),
@@ -1277,12 +1299,87 @@ def _read_thermal(state: _SampleState) -> dict[str, float | None]:
             if metric in values and values[metric] is None and value is not None:
                 values[metric] = float(value)
                 state.sources[metric] = description
-        if all(value is not None for value in values.values()):
-            break
+    if values["cpu_temp"] is None:
+        celsius, description = _acpi_thermal_value()
+        if celsius is not None:
+            values["cpu_temp"] = celsius
+            state.sources["cpu_temp"] = description
     for metric, value in values.items():
         if value is None:
             state.sources[metric] = _NO_SHARED_MEMORY
     return values
+
+
+def _acpi_thermal_celsius() -> float | None:
+    """读取 ACPI 热区（毫开尔文 / 10）并返回最高一个热区的摄氏度；失败返回 ``None``。
+
+    只作兜底：ACPI 热区通常贴主板而非 CPU 核心，读数是量级参考，不是核心温度。
+    查询本身要起一个 PowerShell 子进程（约 0.3 s），因此由 :func:`_refresh_acpi_thermal`
+    在后台线程调用，采样路径只读缓存。
+    """
+    if not _IS_WINDOWS:
+        return None
+
+    try:
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", _ACPI_THERMAL_COMMAND],
+            capture_output=True,
+            text=True,
+            timeout=_ACPI_THERMAL_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    readings: list[float] = []
+    for line in completed.stdout.splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            raw = float(text)
+        except ValueError:
+            continue
+        celsius = (raw / 10.0) - 273.15
+        if _ACPI_MIN_CELSIUS < celsius < _ACPI_MAX_CELSIUS:
+            readings.append(celsius)
+    if not readings:
+        return None
+    return max(readings)
+
+
+def _refresh_acpi_thermal() -> None:
+    """后台刷新 ACPI 温度缓存；同一时刻只允许一个刷新线程。"""
+    global _acpi_celsius, _acpi_sampled_at, _acpi_refreshing
+    with _acpi_lock:
+        if _acpi_refreshing:
+            return
+        _acpi_refreshing = True
+    try:
+        celsius = _acpi_thermal_celsius()
+    finally:
+        with _acpi_lock:
+            _acpi_refreshing = False
+    with _acpi_lock:
+        _acpi_sampled_at = _now()
+        if celsius is not None:
+            _acpi_celsius = celsius
+
+
+def _acpi_thermal_value() -> tuple[float | None, str]:
+    """返回 ACPI 温度缓存值与状态；缓存过期就在后台发起一次刷新。"""
+    global _acpi_celsius
+    with _acpi_lock:
+        celsius = _acpi_celsius
+        stale = _now() - _acpi_sampled_at >= _ACPI_THERMAL_TTL
+        refreshing = _acpi_refreshing
+    if stale and not refreshing:
+        thread = threading.Thread(
+            target=_refresh_acpi_thermal, name="hydrohud-acpi-thermal", daemon=True
+        )
+        thread.start()
+    if celsius is None:
+        return None, _NO_SHARED_MEMORY
+    return celsius, _ACPI_DESCRIPTION
 
 
 def _read_lhm() -> dict[str, float]:

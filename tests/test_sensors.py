@@ -531,6 +531,7 @@ def test_parse_hwinfo_buffer_rejects_unexpected_layout(buffer):
 def test_read_thermal_returns_none_without_shared_memory(monkeypatch):
     monkeypatch.setattr(sensors, "_read_lhm", lambda: {})
     monkeypatch.setattr(sensors, "_read_hwinfo", lambda: {})
+    monkeypatch.setattr(sensors, "_acpi_thermal_value", lambda: (None, sensors._NO_SHARED_MEMORY))
     values = sensors._read_thermal(sensors._SampleState())
     assert values == {"cpu_temp": None, "cpu_power": None, "fan": None}
 
@@ -538,9 +539,21 @@ def test_read_thermal_returns_none_without_shared_memory(monkeypatch):
 def test_read_thermal_prefers_lhm_and_fills_from_hwinfo(monkeypatch):
     monkeypatch.setattr(sensors, "_read_lhm", lambda: {"cpu_temp": 60.0})
     monkeypatch.setattr(sensors, "_read_hwinfo", lambda: {"cpu_temp": 99.0, "fan": 1200.0})
+    monkeypatch.setattr(sensors, "_acpi_thermal_value", lambda: (77.0, "acpi"))
     values = sensors._read_thermal(sensors._SampleState())
     assert values["cpu_temp"] == pytest.approx(60.0)
     assert values["fan"] == pytest.approx(1200.0)
+
+
+def test_read_thermal_falls_back_to_acpi_when_shared_memory_is_missing(monkeypatch):
+    monkeypatch.setattr(sensors, "_read_lhm", lambda: {})
+    monkeypatch.setattr(sensors, "_read_hwinfo", lambda: {})
+    monkeypatch.setattr(sensors, "_acpi_thermal_value", lambda: (31.5, "ACPI 热区"))
+    state = sensors._SampleState()
+    values = sensors._read_thermal(state)
+    assert values["cpu_temp"] == pytest.approx(31.5)
+    assert state.sources["cpu_temp"] == "ACPI 热区"
+    assert state.sources["cpu_power"] == sensors._NO_SHARED_MEMORY
 
 
 def test_read_thermal_survives_parser_exception(monkeypatch):
@@ -549,8 +562,51 @@ def test_read_thermal_survives_parser_exception(monkeypatch):
 
     monkeypatch.setattr(sensors, "_read_lhm", boom)
     monkeypatch.setattr(sensors, "_read_hwinfo", boom)
+    monkeypatch.setattr(sensors, "_acpi_thermal_value", lambda: (None, sensors._NO_SHARED_MEMORY))
     values = sensors._read_thermal(sensors._SampleState())
     assert values == {"cpu_temp": None, "cpu_power": None, "fan": None}
+
+
+class _CompletedProcess:
+    def __init__(self, stdout: str) -> None:
+        self.stdout = stdout
+
+
+def test_acpi_reader_converts_millikelvin_and_keeps_the_hottest_zone(monkeypatch):
+    monkeypatch.setattr(sensors, "_IS_WINDOWS", True)
+    monkeypatch.setattr(
+        sensors.subprocess,
+        "run",
+        lambda *args, **kwargs: _CompletedProcess("2900\n3010\n\n"),
+    )
+    assert sensors._acpi_thermal_celsius() == pytest.approx(3010 / 10.0 - 273.15)
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    ["", "not-a-number\n", "0\n", "99000\n"],
+)
+def test_acpi_reader_rejects_implausible_readings(monkeypatch, stdout):
+    monkeypatch.setattr(sensors, "_IS_WINDOWS", True)
+    monkeypatch.setattr(
+        sensors, "subprocess", type("M", (), {"run": lambda *a, **k: _CompletedProcess(stdout)})
+    )
+    assert sensors._acpi_thermal_celsius() is None
+
+
+def test_acpi_reader_survives_a_missing_powershell(monkeypatch):
+    monkeypatch.setattr(sensors, "_IS_WINDOWS", True)
+
+    def boom(*args, **kwargs):
+        raise OSError("powershell 不在 PATH 里")
+
+    monkeypatch.setattr(sensors.subprocess, "run", boom)
+    assert sensors._acpi_thermal_celsius() is None
+
+
+def test_acpi_reader_is_windows_only(monkeypatch):
+    monkeypatch.setattr(sensors, "_IS_WINDOWS", False)
+    assert sensors._acpi_thermal_celsius() is None
 
 
 # --------------------------------------------------------------------------- #

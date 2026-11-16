@@ -13,9 +13,11 @@
   时钟取当前本地时间，系统监控 / 折线图 / 仪表取 :mod:`hydrohud.sensors` 的
   :class:`~hydrohud.sensors.SensorHub`（模块缺失时整层降级为 "—" / 0）。
 * 图层类型：``text`` / ``clock`` / ``sysinfo`` / ``bars`` / ``chart`` / ``gauge``
-  / ``image``，以及 v1.3 的 ``thermometer`` / ``countdown`` / ``ticker`` /
-  ``sequence`` / ``qrcode`` / ``weather`` / ``nowplaying``；含 ``{metric}`` 占位符的
+  / ``image``，v1.3 的 ``thermometer`` / ``countdown`` / ``ticker`` /
+  ``sequence`` / ``qrcode`` / ``weather`` / ``nowplaying``，以及 v1.5 的
+  ``dashboard``（CPU/GPU 双英雄卡 + 可开关的附加指标行）；含 ``{metric}`` 占位符的
   text 图层按动态图层处理，每帧替换占位符后仍按最终字符串走图层缓存，不会重复真重绘。
+  所有图层都支持 ``visible`` 字段：为 ``False`` 时渲染层直接跳过（编辑器里仍可见）。
 * v1.3 的数据源（二维码 / 天气 / 媒体 / 屏幕捕获 / 插件）全部懒导入：模块缺失时
   图层画占位内容、capture 背景退回纯色、未知图层静默跳过，绝不抛异常。
 * 解码结果（图片、GIF 全部帧、视频帧、字体）都进 LRU 缓存，
@@ -84,6 +86,7 @@ _DYNAMIC_TYPES = frozenset(
         "sequence",
         "weather",
         "nowplaying",
+        "dashboard",
     )
 )
 _VALID_FITS = frozenset(("crop", "fit", "stretch"))
@@ -1453,6 +1456,284 @@ def _layer_image(layer: dict) -> Image.Image:
     return rgba
 
 
+def _mix(
+    first: tuple[int, int, int], second: tuple[int, int, int], amount: float
+) -> tuple[int, int, int]:
+    """按 ``amount``（0~1）在两个颜色之间线性插值。"""
+    factor = max(0.0, min(1.0, float(amount)))
+    return tuple(
+        int(round(first[index] + (second[index] - first[index]) * factor)) for index in range(3)
+    )
+
+
+def _shade(color: tuple[int, int, int], amount: float) -> tuple[int, int, int]:
+    """调亮度：``amount > 0`` 向白提亮，``amount < 0`` 向黑压暗。"""
+    target = (255, 255, 255) if amount >= 0 else (0, 0, 0)
+    return _mix(color, target, abs(amount))
+
+
+def _dashboard_box(layer: dict) -> tuple[float, float, float, float]:
+    """仪表盘图层的外接框 ``(left, top, width, height)``（按锚点换算并夹在屏内）。"""
+    width = max(40.0, min(float(SCREEN_W), float(layer.get("w", 0.92)) * SCREEN_W))
+    height = max(40.0, min(float(SCREEN_H), float(layer.get("h", 0.92)) * SCREEN_H))
+    vertical, horizontal = _anchor_parts(layer.get("anchor", "center"))
+    left = float(layer.get("x", 0.5)) * SCREEN_W
+    top = float(layer.get("y", 0.5)) * SCREEN_H
+    if horizontal == "right":
+        left -= width
+    elif horizontal == "center":
+        left -= width / 2.0
+    if vertical == "bottom":
+        top -= height
+    elif vertical == "center":
+        top -= height / 2.0
+    left = max(0.0, min(SCREEN_W - width, left))
+    top = max(0.0, min(SCREEN_H - height, top))
+    return left, top, width, height
+
+
+def _dashboard_history_points(
+    metric: str, ctx: dict, box: tuple[float, float, float, float], limit: int = 40
+) -> list[tuple[float, float]]:
+    """把 metric 的历史值映射到 ``box`` 内的折线点（最少两点，缺数据时压平）。"""
+    history = _metric_history(metric, ctx)[-limit:]
+    current = _metric_value(metric, ctx)
+    if current is not None:
+        history = [*history, current]
+    if not history:
+        history = [0.0, 0.0]
+    while len(history) < 2:
+        history.append(history[-1])
+    high = max(_metric_max(metric), max(history), 1.0)
+    left, top, right, bottom = box
+    step = (right - left) / max(1, len(history) - 1)
+    points: list[tuple[float, float]] = []
+    for index, value in enumerate(history):
+        ratio = max(0.0, min(1.0, float(value) / high))
+        points.append((left + index * step, bottom - ratio * (bottom - top)))
+    return points
+
+
+def _draw_dashboard_layer(
+    canvas: Image.Image, draw: ImageDraw.ImageDraw, layer: dict, ctx: dict
+) -> None:
+    """性能仪表盘图层：CPU / GPU 双英雄卡 + 可开关的附加指标行。
+
+    ``cpu_metric`` / ``gpu_metric`` 是两张英雄卡的主数值（默认占用率），各自的
+    温度跟在主数值下方；``extras`` 里每多一项，底部就多一行"名称 + 迷你条 + 数值"，
+    因此功耗 / 频率这类信息天然是"勾上就显示、取消就消失"。形状走 2× 超采样后
+    缩小，文字留在 1× 层上画以保持锐利。
+    """
+    box_left, box_top, width, height = _dashboard_box(layer)
+    box_w = max(8, int(round(width)))
+    box_h = max(8, int(round(height)))
+    scale = 2
+    region = Image.new("RGBA", (box_w * scale, box_h * scale), (0, 0, 0, 0))
+    region_draw = ImageDraw.Draw(region)
+
+    pad = max(6.0, width * 0.042)
+    bg = _rgb(layer.get("bg", "#0F172A"))
+    border = _rgb(layer.get("border", "#1E293B"))
+    accent = _rgb(layer.get("accent", "#22D3EE"))
+    muted = _rgb(layer.get("muted_color", "#94A3B8"))
+    text_color = _rgb(layer.get("text_color", "#E2E8F0"))
+    radius = max(2.0, min(26.0, float(layer.get("radius", 0.5)) * width * 0.065))
+
+    def shape(
+        bounds: tuple[float, float, float, float],
+        *,
+        fill: tuple[int, int, int] | None = None,
+        outline: tuple[int, int, int] | None = None,
+        line: float = 1.0,
+        round_radius: float = 0.0,
+    ) -> None:
+        """在超采样层上画一个圆角矩形（坐标是逻辑像素）。"""
+        region_draw.rounded_rectangle(
+            (bounds[0] * scale, bounds[1] * scale, bounds[2] * scale, bounds[3] * scale),
+            radius=max(0.0, round_radius * scale),
+            fill=None if fill is None else (*fill, 255),
+            outline=None if outline is None else (*outline, 255),
+            width=max(1, int(round(line * scale))),
+        )
+
+    def polyline(
+        points: list[tuple[float, float]], color: tuple[int, int, int], line: float
+    ) -> None:
+        if len(points) < 2:
+            return
+        region_draw.line(
+            [(x * scale, y * scale) for x, y in points],
+            fill=(*color, 255),
+            width=max(1, int(round(line * scale))),
+            joint="curve",
+        )
+
+    # 文字留在 1× 层，且必须等超采样区域贴上去之后再画，否则会被整块覆盖。
+    texts: list[tuple[float, float, str, Any, tuple[int, int, int], str]] = []
+
+    def label(
+        x: float,
+        y: float,
+        content: str,
+        font: Any,
+        fill: tuple[int, int, int],
+        anchor: str = "lm",
+    ) -> None:
+        texts.append((box_left + x, box_top + y, content, font, fill, anchor))
+
+    # 外层卡片与顶部强调线
+    shape((0, 0, width, height), fill=bg, outline=border, round_radius=radius)
+    shape((0, 0, width, height * 0.012), fill=accent, round_radius=radius / 2.0)
+
+    show_header = bool(layer.get("show_header", True))
+    header_h = max(18.0, height * 0.115) if show_header else 0.0
+    inner_left = pad
+    inner_right = width - pad
+    body_top = pad + header_h + (height * 0.022 if show_header else 0.0)
+
+    extras: list[str] = []
+    if layer.get("show_extras", True):
+        extras = [str(item) for item in (layer.get("extras") or [])]
+    row_gap = max(3.0, height * 0.012)
+    row_h = max(12.0, height * 0.072)
+    extras_h = len(extras) * row_h + max(0, len(extras) - 1) * row_gap
+    body_bottom = height - pad
+    hero_gap = max(6.0, width * 0.028)
+    hero_h = body_bottom - body_top - extras_h - (row_gap * 1.6 if extras else 0.0)
+    hero_h = max(24.0, hero_h)
+    hero_w = (inner_right - inner_left - hero_gap) / 2.0
+
+    heroes = (
+        (
+            inner_left,
+            "CPU",
+            str(layer.get("cpu_metric") or "cpu"),
+            str(layer.get("cpu_temp_metric") or "cpu_temp"),
+            _rgb(layer.get("cpu_color", "#38BDF8")),
+        ),
+        (
+            inner_left + hero_w + hero_gap,
+            "GPU",
+            str(layer.get("gpu_metric") or "gpu"),
+            str(layer.get("gpu_temp_metric") or "gpu_temp"),
+            _rgb(layer.get("gpu_color", "#A78BFA")),
+        ),
+    )
+
+    label_size = max(8, int(round(row_h * 0.52)))
+    tag_size = max(9, int(round(min(hero_w, hero_h) * 0.105)))
+    small_font = load_font(tag_size, bold=True)
+    temp_size = max(9, int(round(min(hero_w, hero_h) * 0.125)))
+    temp_font = load_font(temp_size, bold=False)
+    value_size = int(layer.get("value_size", 64))
+    value_size = max(12, min(value_size, int(round(hero_w * 0.42)), int(round(hero_h * 0.30))))
+    value_font = load_font(value_size, bold=True)
+    extras_label_font = load_font(max(8, label_size))
+    extras_value_font = load_font(max(8, label_size), bold=True)
+
+    def text_height(content: str, font: Any) -> float:
+        """文字实际高度（用于纵向堆叠，避免字号一大就压住上一行）。"""
+        try:
+            top, bottom = draw.textbbox((0, 0), content or "0", font=font)[1::2]
+        except (OSError, ValueError):
+            return float(getattr(font, "size", 12))
+        return float(max(1, bottom - top))
+
+    for offset_x, tag, usage_metric, temp_metric, tint in heroes:
+        panel = (offset_x, body_top, offset_x + hero_w, body_top + hero_h)
+        shape(
+            panel,
+            fill=_shade(bg, 0.10),
+            outline=_shade(tint, -0.62),
+            round_radius=min(14.0, hero_w * 0.09),
+        )
+        # 左上角项目标签旁边的一根同色竖条
+        shape(
+            (
+                offset_x + hero_w * 0.065,
+                body_top + hero_h * 0.10,
+                offset_x + hero_w * 0.065 + max(1.6, hero_w * 0.014),
+                body_top + hero_h * 0.10 + tag_size * 1.15,
+            ),
+            fill=tint,
+            round_radius=1.0,
+        )
+        usage_value = _metric_value(usage_metric, ctx)
+        temp_value = _metric_value(temp_metric, ctx)
+        usage_text = _format_value(usage_metric, usage_value)
+        temp_text = _format_value(temp_metric, temp_value)
+        # 使用率曲线贴住卡片底部
+        if layer.get("show_history", True):
+            chart_top = body_top + hero_h * 0.64
+            chart_bottom = body_top + hero_h * 0.92
+            points = _dashboard_history_points(
+                usage_metric,
+                ctx,
+                (offset_x + hero_w * 0.06, chart_top, offset_x + hero_w * 0.94, chart_bottom),
+            )
+            polyline(points, _shade(tint, -0.10), max(1.4, hero_w * 0.014))
+        cursor_y = body_top + hero_h * 0.085
+        label(offset_x + hero_w * 0.11, cursor_y, tag, small_font, tint, "lt")
+        cursor_y += text_height(tag, small_font) + hero_h * 0.025
+        label(offset_x + hero_w * 0.11, cursor_y, usage_text, value_font, text_color, "lt")
+        cursor_y += text_height(usage_text, value_font) + hero_h * 0.012
+        label(offset_x + hero_w * 0.11, cursor_y, temp_text, temp_font, _shade(tint, 0.22), "lt")
+
+    # 附加指标行：名称 + 迷你条 + 数值
+    cursor = body_top + hero_h + row_gap * 1.6
+    bar_left = inner_left + (inner_right - inner_left) * 0.42
+    bar_right = inner_right - (inner_right - inner_left) * 0.22
+    for index, metric in enumerate(extras):
+        top_y = cursor + index * (row_h + row_gap)
+        if top_y + row_h > body_bottom + 0.5:
+            break
+        tint = accent if index % 2 == 0 else _rgb(layer.get("gpu_color", "#A78BFA"))
+        mid_y = top_y + row_h / 2.0
+        bar_h = max(3.0, row_h * 0.26)
+        track = (bar_left, mid_y - bar_h / 2.0, bar_right, mid_y + bar_h / 2.0)
+        shape(track, fill=_shade(bg, 0.16), round_radius=bar_h / 2.0)
+        value = _metric_value(metric, ctx)
+        ratio = 0.0 if value is None else max(0.0, min(1.0, value / _metric_max(metric)))
+        if ratio > 0.0:
+            filled_right = bar_left + (bar_right - bar_left) * ratio
+            shape(
+                (bar_left, track[1], filled_right, track[3]),
+                fill=tint,
+                round_radius=bar_h / 2.0,
+            )
+        label(inner_left, mid_y, _metric_label(metric), extras_label_font, muted, "lm")
+        label(inner_right, mid_y, _format_value(metric, value), extras_value_font, text_color, "rm")
+
+    if show_header:
+        title_font = load_font(max(9, int(round(header_h * 0.60))), bold=True)
+        clock_font = load_font(max(9, int(round(header_h * 0.56))), bold=False)
+        title = str(layer.get("title") or "AURORA")
+        label(inner_left, pad + header_h * 0.5, title, title_font, text_color, "lm")
+        label(
+            inner_right,
+            pad + header_h * 0.5,
+            _safe_strftime(_dt.datetime.now(), "%H:%M"),
+            clock_font,
+            muted,
+            "rm",
+        )
+        shape(
+            (
+                inner_left,
+                pad + header_h * 0.94,
+                inner_right,
+                pad + header_h * 0.94 + max(1.0, height * 0.0035),
+            ),
+            fill=_shade(border, 0.14),
+            round_radius=1.0,
+        )
+
+    scaled = region.resize((box_w, box_h), Image.Resampling.LANCZOS)
+    canvas.paste(scaled, (int(round(box_left)), int(round(box_top))), scaled)
+    for text_x, text_y, content, font, fill, anchor in texts:
+        draw.text((text_x, text_y), content, font=font, fill=fill, anchor=anchor)
+
+
 def _draw_image_layer(canvas: Image.Image, layer: dict, draw: ImageDraw.ImageDraw) -> None:
     try:
         image = _layer_image(layer)
@@ -2537,6 +2818,11 @@ def _new_canvas() -> tuple[Image.Image, ImageDraw.ImageDraw]:
     return canvas, ImageDraw.Draw(canvas)
 
 
+#: 隐藏图层（``visible=False``）的渲染结果：一张共享的全透明画布。
+#: 调用方只读不写（``paste`` 的来源图不会被修改），因此可以安全复用。
+_EMPTY_OVERLAY = Image.new("RGBA", (SCREEN_W, SCREEN_H), (0, 0, 0, 0))
+
+
 def _render_layer(layer: dict, t: float, ctx: dict) -> Image.Image:
     """把一个图层画到透明画布上（返回 RGBA 全屏图像）。"""
     canvas, draw = _new_canvas()
@@ -2570,6 +2856,8 @@ def _render_layer(layer: dict, t: float, ctx: dict) -> Image.Image:
         _draw_weather_layer(draw, layer, ctx, t)
     elif kind == "nowplaying":
         _draw_nowplaying_layer(canvas, draw, layer, ctx, t)
+    elif kind == "dashboard":
+        _draw_dashboard_layer(canvas, draw, layer, ctx)
     else:
         _dispatch_plugin_layer(canvas, layer, ctx)
     return canvas
@@ -2611,6 +2899,8 @@ def _chart_cache_key(layer: dict, signature: str, ctx: dict) -> tuple:
 
 def _layer_overlay(layer: dict, signature: str, t: float, ctx: dict) -> Image.Image:
     """取（并缓存）图层渲染结果，动态图层按内容字符串做缓存键。"""
+    if not layer.get("visible", True):
+        return _EMPTY_OVERLAY
     kind = layer.get("type")
     if kind == "text" and _text_needs_refresh(layer):
         resolved = _resolve_template(str(layer.get("text") or ""), ctx)
@@ -2664,6 +2954,12 @@ def _layer_overlay(layer: dict, signature: str, t: float, ctx: dict) -> Image.Im
         if cached is not None:
             return cached
         overlay = _render_layer(layer, t, ctx)
+    elif kind == "dashboard":
+        key = _dashboard_cache_key(layer, signature, ctx)
+        cached = _lru_touch(_layer_cache, key)
+        if cached is not None:
+            return cached
+        overlay = _render_layer(layer, t, ctx)
     else:
         key = (signature,)
         cached = _lru_touch(_layer_cache, key)
@@ -2676,6 +2972,23 @@ def _layer_overlay(layer: dict, signature: str, t: float, ctx: dict) -> Image.Im
             return overlay
     _lru_put(_layer_cache, key, overlay, _LAYER_CACHE_LIMIT)
     return overlay
+
+
+def _dashboard_cache_key(layer: dict, signature: str, ctx: dict) -> tuple:
+    """dashboard 的缓存键：签名 + 每个显示中的指标值 + 时钟文本。"""
+    metrics = [
+        str(layer.get("cpu_metric") or "cpu"),
+        str(layer.get("gpu_metric") or "gpu"),
+        str(layer.get("cpu_temp_metric") or "cpu_temp"),
+        str(layer.get("gpu_temp_metric") or "gpu_temp"),
+    ]
+    if layer.get("show_extras", True):
+        metrics.extend(str(item) for item in (layer.get("extras") or []))
+    return (
+        signature,
+        tuple(_round_or_none(_metric_value(metric, ctx)) for metric in metrics),
+        _safe_strftime(_dt.datetime.now(), "%H:%M"),
+    )
 
 
 def _bars_cache_key(layer: dict, ctx: dict) -> tuple:

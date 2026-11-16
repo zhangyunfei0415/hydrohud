@@ -174,15 +174,16 @@ _PERMISSION_LABELS = {"network": "网络访问", "filesystem": "文件读写"}
 # 主题
 # --------------------------------------------------------------------------- #
 FONT_FAMILY = "Microsoft YaHei UI"
-BG = "#0B0F14"
-CARD = "#111827"
-CARD_HI = "#172033"
-CARD_2 = "#0F172A"
-BORDER = "#1F2A37"
+BG = "#070B12"
+CARD = "#0E1626"
+CARD_HI = "#152034"
+CARD_2 = "#0B1320"
+BORDER = "#1B2740"
 TEXT = "#E5E7EB"
 MUTED = "#94A3B8"
 ACCENT = "#38BDF8"
 ACCENT_2 = "#22D3EE"
+ACCENT_3 = "#A78BFA"
 OK = "#34D399"
 WARN = "#FBBF24"
 ERR = "#F87171"
@@ -192,6 +193,9 @@ BTN_ACTIVE = "#0E1622"
 ENTRY_BG = "#0A1017"
 SELECT_BG = "#0E4A63"
 DARK_INK = "#04121C"
+RAIL_BG = "#0A1220"
+CHIP_BG = "#0C1524"
+BADGE_BG = "#0B1B2A"
 
 BG_TYPE_LABELS = ("纯色", "图片", "GIF 动图", "视频", "屏幕捕获")
 BG_TYPE_BY_LABEL = {
@@ -394,7 +398,7 @@ def scene_is_dynamic(scene: dict) -> bool:
         if not isinstance(layer, dict):
             continue
         kind = layer.get("type")
-        if kind in ("clock", "sysinfo", "bars", "chart", "gauge"):
+        if kind in ("clock", "sysinfo", "bars", "chart", "gauge", "dashboard"):
             return True
         if kind == "text" and _text_has_metric_layer(layer):
             return True
@@ -432,6 +436,10 @@ def layer_label(layer: dict) -> str:
     if kind == "image":
         path = str(layer.get("path") or "")
         return f"图片 · {os.path.basename(path) if path else '未选择'}"
+    if kind == "dashboard":
+        names = [str(item) for item in layer.get("extras") or []]
+        tail = " · " + "/".join(_metric_text(item) for item in names) if names else ""
+        return f"性能仪表盘 · {str(layer.get('title') or 'AURORA')}{tail}"
     return f"图层 · {kind}"
 
 
@@ -461,6 +469,18 @@ def _norm_color(value: Any, default: str) -> str:
     if isinstance(value, str) and _HEX_COLOR.match(value):
         return value.upper()
     return default
+
+
+def _blend(color: str, other: str, amount: float) -> str:
+    """把两个 #RRGGBB 按 ``amount``（0 = 全是 color，1 = 全是 other）插值。"""
+    weight = max(0.0, min(1.0, float(amount)))
+    try:
+        first = tuple(int(color[index : index + 2], 16) for index in (1, 3, 5))
+        second = tuple(int(other[index : index + 2], 16) for index in (1, 3, 5))
+    except (ValueError, IndexError):
+        return color
+    mixed = tuple(round(a + (b - a) * weight) for a, b in zip(first, second, strict=True))
+    return "#{:02X}{:02X}{:02X}".format(*mixed)
 
 
 def _fallback_normalize(scene: Any) -> dict:
@@ -884,6 +904,10 @@ class App(tk.Tk):
         self._tips_card: tk.Frame | None = None
         self._tips_visible = True
         self._compact_mode = False
+        self._rail_dot: tk.Label | None = None
+        self._chip_version: tk.Label | None = None
+        self._chip_frames: tk.Label | None = None
+        self._chip_device: tk.Label | None = None
         self._layer_up_btn: ttk.Button | None = None
         self._layer_down_btn: ttk.Button | None = None
         self._layer_delete_btn: ttk.Button | None = None
@@ -914,9 +938,9 @@ class App(tk.Tk):
 
         self.scene: dict = self._initial_scene()
 
-        self.title("HydroHUD — TCOMAS LG600 开源控制台")
-        self.geometry("1180x780")
-        self.minsize(1080, 700)
+        self.title("HydroHUD — Aurora 水冷屏控制台")
+        self.geometry("1268x860")
+        self.minsize(1150, 720)
         self.configure(bg=BG)
         self.report_callback_exception = self._on_tk_callback_error
 
@@ -942,6 +966,7 @@ class App(tk.Tk):
         self.after(40, self._poll_render)
         self.after(80, self._poll_events)
         self.after(500, lambda: self._detect_device(auto=True))
+        self.after(300, self._metrics_tick)
 
         if self.smoke_shot:
             self._schedule_smoke()
@@ -1223,7 +1248,7 @@ class App(tk.Tk):
         self.grid_columnconfigure(0, weight=1)
 
         header = tk.Frame(self, bg=BG)
-        header.grid(row=0, column=0, sticky="ew", padx=16, pady=(12, 4))
+        header.grid(row=0, column=0, sticky="ew", padx=16, pady=(12, 6))
         brand = tk.Frame(header, bg=BG)
         brand.pack(side="left")
         tk.Label(brand, text="HydroHUD", bg=BG, fg=TEXT, font=(FONT_FAMILY, 18, "bold")).pack(
@@ -1236,23 +1261,56 @@ class App(tk.Tk):
             fg=MUTED,
             font=(FONT_FAMILY, 9),
         ).pack(anchor="w")
+
+        badge = tk.Frame(header, bg=BADGE_BG, highlightthickness=1, highlightbackground=ACCENT_2)
+        badge.pack(side="left", padx=(14, 0))
+        tk.Label(
+            badge,
+            text="AURORA",
+            bg=BADGE_BG,
+            fg=ACCENT_2,
+            font=(FONT_FAMILY, 9, "bold"),
+        ).pack(padx=12, pady=3)
+
+        right_head = tk.Frame(header, bg=BG)
+        right_head.pack(side="right")
         self._header_hint = tk.Label(
-            header,
+            right_head,
             text=f"v{APP_VERSION} · 启动不会连接设备",
             bg=BG,
             fg=MUTED,
-            font=(FONT_FAMILY, 9),
+            font=(FONT_FAMILY, 8),
         )
-        self._header_hint.pack(side="right")
+        self._header_hint.pack(side="bottom", anchor="e", pady=(4, 0))
+        chips = tk.Frame(right_head, bg=BG)
+        chips.pack(side="top", anchor="e")
+        self._chip_version = self._chip(chips, f"v{APP_VERSION}", ACCENT_3)
+        self._chip_frames = self._chip(chips, "已推 0 帧 · 0.0 fps", MUTED)
+        self._chip_device = self._chip(chips, "● 设备未连接", MUTED)
 
-        body = tk.Frame(self, bg=BG)
-        body.grid(row=1, column=0, sticky="nsew", padx=12, pady=8)
+        # 图标栏与三栏内容同处一个容器：用 pack 隔离，避免 grid 列宽被表头撑开。
+        shell = tk.Frame(self, bg=BG)
+        shell.grid(row=1, column=0, sticky="nsew", padx=(10, 12), pady=(6, 8))
+
+        rail = tk.Frame(
+            shell, bg=RAIL_BG, width=64, highlightthickness=1, highlightbackground=BORDER
+        )
+        rail.pack(side="left", fill="y", padx=(0, 10))
+        rail.pack_propagate(False)
+        self._rail = rail
+        self._build_rail(rail)
+
+        body = tk.Frame(shell, bg=BG)
+        body.pack(side="left", fill="both", expand=True)
         body.grid_rowconfigure(0, weight=1)
         body.grid_columnconfigure(1, weight=1, minsize=360)
 
         left = tk.Frame(body, bg=BG, width=268)
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
         left.grid_propagate(False)
+        left.grid_rowconfigure(0, weight=1)
+        left.grid_columnconfigure(0, weight=1)
+        left_content = self._scroll_panel(left)
         middle = tk.Frame(body, bg=BG)
         middle.grid(row=0, column=1, sticky="nsew")
         middle.grid_rowconfigure(0, weight=1)
@@ -1261,10 +1319,77 @@ class App(tk.Tk):
         right.grid(row=0, column=2, sticky="nsew", padx=(12, 0))
         right.grid_propagate(False)
 
-        self._build_device_panel(left)
+        self._build_metrics_panel(left_content)
+        self._build_device_panel(left_content)
         self._build_preview_panel(middle)
         self._build_editor_panel(right)
         self._build_bottom_bar()
+
+    # -- 左侧图标栏 ---------------------------------------------------- #
+    def _build_rail(self, rail: tk.Frame) -> None:
+        """竖向图标栏：Logo + 常用动作 + 底部连接指示灯。"""
+        logo = tk.Frame(rail, bg=ACCENT_2, width=36, height=36)
+        logo.pack(pady=(12, 16))
+        logo.pack_propagate(False)
+        tk.Label(logo, text="H", bg=ACCENT_2, fg=DARK_INK, font=(FONT_FAMILY, 16, "bold")).pack(
+            expand=True
+        )
+        for glyph, caption, command in (
+            ("◉", "设备", self._on_detect),
+            ("▶", "推送", self._on_start_stream),
+            ("⏹", "停止", self._on_stop_stream),
+            ("▤", "预设", lambda: self._select_editor_tab(0)),
+            ("☰", "图层", lambda: self._select_editor_tab(2)),
+            ("◐", "主题", self._on_open_preset_library),
+            ("ⓘ", "关于", self._on_about),
+        ):
+            self._rail_button(rail, glyph, caption, command)
+        self._rail_dot = tk.Label(rail, text="●", bg=RAIL_BG, fg=MUTED, font=(FONT_FAMILY, 13))
+        self._rail_dot.pack(side="bottom", pady=(0, 14))
+
+    def _rail_button(self, rail: tk.Frame, glyph: str, caption: str, command) -> None:
+        item = tk.Frame(rail, bg=RAIL_BG)
+        item.pack(fill="x", padx=6, pady=3)
+        icon = tk.Label(item, text=glyph, bg=RAIL_BG, fg=MUTED, font=(FONT_FAMILY, 13))
+        icon.pack(pady=(6, 0))
+        text = tk.Label(item, text=caption, bg=RAIL_BG, fg="#64748B", font=(FONT_FAMILY, 7))
+        text.pack(pady=(0, 5))
+
+        def paint(color: str) -> None:
+            for widget in (item, icon, text):
+                widget.configure(bg=CARD_HI if color == ACCENT_2 else RAIL_BG)
+            icon.configure(fg=color)
+            text.configure(fg=color if color == ACCENT_2 else "#64748B")
+
+        for widget in (item, icon, text):
+            widget.bind("<Enter>", lambda _event: paint(ACCENT_2))
+            widget.bind("<Leave>", lambda _event: paint(MUTED))
+            widget.bind("<Button-1>", lambda _event: command())
+
+    def _chip(self, parent: tk.Widget, text: str, color: str) -> tk.Label:
+        """顶栏状态胶囊：圆角是 Tk 的限制，用暗底 + 1px 边框近似。"""
+        chip = tk.Label(
+            parent,
+            text=text,
+            bg=CHIP_BG,
+            fg=color,
+            font=(FONT_FAMILY, 8),
+            padx=10,
+            pady=3,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+        )
+        chip.pack(side="left", padx=(6, 0))
+        return chip
+
+    def _select_editor_tab(self, index: int) -> None:
+        notebook = getattr(self, "_notebook", None)
+        if notebook is None:
+            return
+        try:
+            notebook.select(index)
+        except tk.TclError:
+            pass
 
     # -- 通用控件 ------------------------------------------------------ #
     def _label(
@@ -1293,10 +1418,16 @@ class App(tk.Tk):
 
     @staticmethod
     def _card(parent: tk.Widget, title: str, subtitle: str = "") -> tuple[tk.Frame, tk.Frame]:
-        """卡片式分区：暗色底 + 1px 边框 + 标题（左侧强调色竖条）。"""
+        """卡片式分区：暗色底 + 1px 边框 + 顶部渐变细线 + 标题（左侧强调色竖条）。"""
         card = tk.Frame(parent, bg=CARD, highlightthickness=1, highlightbackground=BORDER, bd=0)
+        edge = tk.Frame(card, bg=ACCENT, height=2)
+        edge.pack(fill="x", side="top")
+        edge_left = tk.Frame(edge, bg=ACCENT, height=2)
+        edge_left.place(relx=0.0, rely=0.0, relwidth=0.55, relheight=1.0)
+        edge_right = tk.Frame(edge, bg=ACCENT_3, height=2)
+        edge_right.place(relx=0.55, rely=0.0, relwidth=0.45, relheight=1.0)
         head = tk.Frame(card, bg=CARD)
-        head.pack(fill="x", padx=14, pady=(12, 6))
+        head.pack(fill="x", padx=14, pady=(11, 6))
         tk.Frame(head, bg=ACCENT, width=3, height=14).pack(side="left", padx=(0, 8))
         tk.Label(head, text=title, bg=CARD, fg=TEXT, font=(FONT_FAMILY, 11, "bold")).pack(
             side="left"
@@ -1377,12 +1508,50 @@ class App(tk.Tk):
             widget.bind("<MouseWheel>", _wheel)
         return inner
 
+    def _scroll_panel(self, parent: tk.Frame) -> tk.Frame:
+        """整列可滚动容器：内容比列高时出现滚动条，而不是把卡片裁掉。"""
+        canvas = tk.Canvas(parent, bg=BG, highlightthickness=0, bd=0)
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+
+        inner = tk.Frame(canvas, bg=BG)
+        window = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _sync_scrollregion(_event: tk.Event) -> None:
+            bbox = canvas.bbox("all")
+            if bbox is None:
+                return
+            canvas.configure(scrollregion=bbox)
+            needs_bar = bbox[3] - bbox[1] > canvas.winfo_height() + 1
+            if needs_bar and not scrollbar.winfo_ismapped():
+                scrollbar.pack(side="right", fill="y", before=canvas)
+            elif not needs_bar and scrollbar.winfo_ismapped():
+                scrollbar.pack_forget()
+
+        def _sync_window(event: tk.Event) -> None:
+            canvas.itemconfigure(window, width=event.width)
+            needed = inner.winfo_reqheight()
+            if abs(int(float(canvas.itemcget(window, "height") or 0)) - needed) > 1:
+                canvas.itemconfigure(window, height=needed)
+
+        def _wheel(event: tk.Event) -> str:
+            if canvas.bbox("all") is None:
+                return "break"
+            canvas.yview_scroll(-int(event.delta / 120), "units")
+            return "break"
+
+        inner.bind("<Configure>", _sync_scrollregion)
+        canvas.bind("<Configure>", _sync_window)
+        for widget in (canvas, inner):
+            widget.bind("<MouseWheel>", _wheel)
+        return inner
+
     # -- 左栏：设备 ---------------------------------------------------- #
     def _build_device_panel(self, parent: tk.Frame) -> None:
-        parent.grid_rowconfigure(0, weight=1)
         parent.grid_columnconfigure(0, weight=1)
         card, body = self._card(parent, "设备")
-        card.grid(row=0, column=0, sticky="nsew")
+        card.grid(row=1, column=0, sticky="ew", pady=(10, 0))
 
         self._conn_label = tk.Label(
             body, text="● 未连接", bg=CARD, fg=MUTED, font=(FONT_FAMILY, 11, "bold"), anchor="w"
@@ -1402,7 +1571,7 @@ class App(tk.Tk):
             side="left", padx=(6, 0)
         )
 
-        ttk.Separator(body, orient="horizontal").pack(fill="x", pady=10)
+        ttk.Separator(body, orient="horizontal").pack(fill="x", pady=8)
 
         bright_head = tk.Frame(body, bg=CARD)
         bright_head.pack(fill="x")
@@ -1418,27 +1587,30 @@ class App(tk.Tk):
 
         power_row = tk.Frame(body, bg=CARD)
         power_row.pack(fill="x", pady=(6, 0))
-        power_row.grid_columnconfigure(0, weight=1)
-        power_row.grid_columnconfigure(1, weight=1)
+        for column in range(3):
+            power_row.grid_columnconfigure(column, weight=1)
         ttk.Button(
             power_row,
-            text="打开屏幕",
+            text="开屏",
             style="Small.TButton",
             command=lambda: self._control_job(
                 "power-on", lambda control: control.set_power(True), "已发送开屏指令"
             ),
-        ).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 3))
         ttk.Button(
             power_row,
-            text="关闭屏幕",
+            text="关屏",
             style="Small.TButton",
             command=lambda: self._control_job(
                 "power-off", lambda control: control.set_power(False), "已发送关屏指令"
             ),
-        ).grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        ).grid(row=0, column=1, sticky="ew", padx=3)
+        ttk.Button(power_row, text="状态", style="Ghost.TButton", command=self._on_query).grid(
+            row=0, column=2, sticky="ew", padx=(3, 0)
+        )
 
         rotate_row = tk.Frame(body, bg=CARD)
-        rotate_row.pack(fill="x", pady=(10, 0))
+        rotate_row.pack(fill="x", pady=(8, 0))
         self._label(rotate_row, "屏幕方向", size=9, color=MUTED).pack(side="left")
         self._rotate_var = tk.StringVar(value="0°")
         rotate_combo = ttk.Combobox(
@@ -1450,15 +1622,9 @@ class App(tk.Tk):
         )
         rotate_combo.pack(side="right")
         rotate_combo.bind("<<ComboboxSelected>>", self._on_rotation_selected)
-        self._label(body, "仅保存到设备配置，不会旋转推送画面", size=8, color=MUTED, wrap=224).pack(
-            fill="x", pady=(2, 0)
-        )
 
-        ttk.Button(body, text="读取设备状态", style="Ghost.TButton", command=self._on_query).pack(
-            fill="x", pady=(10, 0)
-        )
         self._device_reply = self._label(body, "设备回复：—", size=8, color=MUTED, wrap=224)
-        self._device_reply.pack(fill="x", pady=(6, 0))
+        self._device_reply.pack(fill="x", pady=(8, 0))
 
         self._device_hint = self._label(
             body,
@@ -1471,10 +1637,10 @@ class App(tk.Tk):
             color=MUTED,
             wrap=224,
         )
-        self._device_hint.pack(fill="x", side="bottom", pady=(8, 0))
+        self._device_hint.pack(fill="x", pady=(6, 0))
 
         tips_card, tips_body = self._card(parent, "上手提示")
-        tips_card.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        tips_card.grid(row=3, column=0, sticky="ew", pady=(10, 0))
         self._tips_card = tips_card
         for line in (
             "· 启动不连接设备，点「开始推送」才打开",
@@ -1482,6 +1648,199 @@ class App(tk.Tk):
             "· 30 fps 已足够，过高会占用 CPU",
         ):
             self._label(tips_body, line, size=8, color=MUTED, wrap=232).pack(fill="x")
+
+    # -- 左栏：实时指标 ------------------------------------------------ #
+    def _build_metrics_panel(self, parent: tk.Frame) -> None:
+        card, body = self._card(parent, "实时指标", "常驻")
+        card.grid(row=0, column=0, sticky="ew")
+        self._metrics_card = card
+
+        self._metric_bars: dict[str, tuple[tk.Canvas, tk.Label]] = {}
+        self._metric_sparks: dict[str, tk.Canvas] = {}
+        for metric, caption, color in (
+            ("cpu", "CPU 使用率", ACCENT),
+            ("gpu", "GPU 使用率", ACCENT_3),
+        ):
+            head = tk.Frame(body, bg=CARD)
+            head.pack(fill="x", pady=(2, 2))
+            self._label(head, caption, size=9, color=MUTED).pack(side="left")
+            value = self._label(head, "—", size=10, color=color, bold=True)
+            value.pack(side="right")
+            bar = tk.Canvas(
+                body,
+                bg=ENTRY_BG,
+                height=6,
+                highlightthickness=0,
+                bd=0,
+            )
+            bar.pack(fill="x", pady=(0, 3))
+            bar.bind("<Configure>", self._on_metric_bar_resize)
+            spark = tk.Canvas(
+                body,
+                bg=CARD_2,
+                height=34,
+                highlightthickness=1,
+                highlightbackground=BORDER,
+                bd=0,
+            )
+            spark.pack(fill="x", pady=(0, 6))
+            spark.bind("<Configure>", self._on_metric_bar_resize)
+            self._metric_bars[metric] = (bar, value)
+            self._metric_sparks[metric] = spark
+
+        # 温度是常驻信息：CPU 温度读不到时显示「不可用」，仍然占着这一格。
+        temp_row = tk.Frame(body, bg=CARD)
+        temp_row.pack(fill="x", pady=(2, 6))
+        temp_row.grid_columnconfigure(0, weight=1)
+        temp_row.grid_columnconfigure(1, weight=1)
+        self._temp_labels: dict[str, tk.Label] = {}
+        for column, (metric, caption) in enumerate(
+            (("cpu_temp", "CPU 温度"), ("gpu_temp", "GPU 温度"))
+        ):
+            cell = tk.Frame(temp_row, bg=CARD)
+            cell.grid(row=0, column=column, sticky="ew", padx=(0, 6) if column == 0 else (6, 0))
+            self._label(cell, caption, size=8, color=MUTED).pack(anchor="w")
+            value = self._label(cell, "—", size=14, color=TEXT, bold=True)
+            value.pack(anchor="w")
+            self._temp_labels[metric] = value
+
+        # 功耗 / 频率等是可开关的附加信息（默认打开，取消勾选就收起）。
+        self._metric_hint = self._label(body, "", size=8, color=WARN, wrap=232)
+        self._metric_extras_var = tk.BooleanVar(value=True)
+        toggle = tk.Checkbutton(
+            body,
+            text="显示功耗 / 频率等附加指标",
+            variable=self._metric_extras_var,
+            command=self._on_toggle_metric_extras,
+            bg=CARD,
+            fg=MUTED,
+            activebackground=CARD,
+            activeforeground=TEXT,
+            selectcolor=ENTRY_BG,
+            highlightthickness=0,
+            bd=0,
+            anchor="w",
+            font=(FONT_FAMILY, 8),
+        )
+        toggle.pack(fill="x", pady=(2, 0))
+        self._metric_extras = self._label(body, "—", size=8, color=MUTED, wrap=232)
+        self._metric_extras.pack(fill="x", pady=(2, 0))
+        self._metric_hint.pack(fill="x", pady=(4, 0))
+
+    def _metrics_tick(self) -> None:
+        """左栏指标卡每 0.6 秒刷新一次（与预览帧率无关）。"""
+        if self._closing:
+            return
+        self._update_metrics_card()
+        self.after(600, self._metrics_tick)
+
+    def _on_metric_bar_resize(self, event: tk.Event) -> None:
+        """进度条随卡片宽度重绘（记录宽度，下一次采样时按比例填充）。"""
+        self._metric_bar_width = max(1, event.width)
+        self._update_metrics_card()
+
+    def _on_toggle_metric_extras(self) -> None:
+        show = bool(self._metric_extras_var.get())
+        if show:
+            self._metric_extras.pack(fill="x", pady=(2, 0))
+        else:
+            self._metric_extras.pack_forget()
+        self._update_metrics_card()
+
+    def _update_metrics_card(self) -> None:
+        """把传感器采样写进左栏指标卡；缺数据的指标显示「—」。"""
+        if sensors_mod is None or not hasattr(self, "_metric_bars"):
+            return
+        try:
+            values = sensors_mod.get_hub().sample()
+        except Exception as exc:  # 采样失败不能影响界面
+            _warn_once(f"指标采样失败：{exc}")
+            values = {}
+        for metric, (bar, label) in self._metric_bars.items():
+            value = values.get(metric)
+            text = sensors_mod.format_value(metric, value) if value is not None else "—"
+            try:
+                label.configure(text=text)
+            except tk.TclError:
+                return
+            self._paint_metric_bar(bar, value, ACCENT if metric == "cpu" else ACCENT_3)
+            spark = getattr(self, "_metric_sparks", {}).get(metric)
+            if spark is not None:
+                try:
+                    history = sensors_mod.get_hub().history(metric)
+                except Exception:  # noqa: BLE001 - 历史曲线缺失时保留上一次画面
+                    history = []
+                self._paint_sparkline(spark, history, ACCENT if metric == "cpu" else ACCENT_3)
+        for metric, label in self._temp_labels.items():
+            value = values.get(metric)
+            text = sensors_mod.format_value(metric, value) if value is not None else "—"
+            try:
+                label.configure(text=text, fg=TEXT if value is not None else "#4B5563")
+            except tk.TclError:
+                return
+        if bool(self._metric_extras_var.get()):
+            parts = []
+            for metric in ("cpu_power", "cpu_freq", "gpu_power", "gpu_clock"):
+                value = values.get(metric)
+                text = sensors_mod.format_value(metric, value) if value is not None else "—"
+                parts.append(f"{sensors_mod.metric_label(metric)} {text}")
+            try:
+                self._metric_extras.configure(text=" · ".join(parts))
+            except tk.TclError:
+                pass
+        hint = ""
+        try:
+            description = sensors_mod.get_hub().describe()
+        except Exception:  # noqa: BLE001 - 描述缺失不影响数值显示
+            description = {}
+        if values.get("cpu_temp") is None:
+            hint = "CPU 温度读不到：装 LibreHardwareMonitor 开共享内存"
+        elif "ACPI" in str(description.get("cpu_temp", {}).get("source") or ""):
+            hint = "CPU 温度取自 ACPI 主板传感器"
+        try:
+            self._metric_hint.configure(text=hint)
+        except tk.TclError:
+            pass
+
+    def _paint_sparkline(self, canvas: tk.Canvas, values: list[float], color: str) -> None:
+        """迷你折线：把最近的百分比采样画成 0–100% 的折线 + 半透明面积。"""
+        try:
+            canvas.delete("all")
+            width = int(canvas.winfo_width() or 0)
+            height = int(canvas.winfo_height() or 0)
+            if width <= 2 or height <= 2:
+                return
+            points = [float(value) for value in values[-48:]]
+            if len(points) < 2:
+                return
+            step = width / max(1, len(points) - 1)
+            coords: list[float] = []
+            for index, value in enumerate(points):
+                ratio = max(0.0, min(1.0, value / 100.0))
+                coords.extend((index * step, height - 1 - ratio * (height - 2)))
+            area = [0.0, float(height)] + coords + [float(width), float(height)]
+            canvas.create_polygon(area, fill=_blend(color, BG, 0.72), outline="")
+            canvas.create_line(coords, fill=color, width=2, smooth=True)
+            last_y = coords[-1]
+            canvas.create_oval(
+                coords[-2] - 2, last_y - 2, coords[-2] + 2, last_y + 2, fill=color, outline=""
+            )
+        except tk.TclError:
+            pass
+
+    def _paint_metric_bar(self, bar: tk.Canvas, value: float | None, color: str) -> None:
+        try:
+            bar.delete("all")
+            width = int(bar.winfo_width() or 0)
+            height = int(bar.winfo_height() or 6)
+            if width <= 1:
+                return
+            ratio = 0.0 if value is None else max(0.0, min(1.0, float(value) / 100.0))
+            bar.create_rectangle(0, 0, width, height, fill=ENTRY_BG, outline="")
+            if ratio > 0:
+                bar.create_rectangle(0, 0, int(width * ratio), height, fill=color, outline="")
+        except tk.TclError:
+            pass
 
     # -- 中栏：预览 ---------------------------------------------------- #
     def _build_preview_panel(self, parent: tk.Frame) -> None:
@@ -1513,6 +1872,24 @@ class App(tk.Tk):
         self._preview_render_label.pack(side="left")
         self._jpeg_label = self._label(info, "JPEG —", size=9, color=MUTED)
         self._jpeg_label.pack(side="right")
+
+        stats = tk.Frame(body, bg=CARD)
+        stats.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        stats.grid_columnconfigure(0, weight=1)
+        stats.grid_columnconfigure(1, weight=1)
+        stats.grid_columnconfigure(2, weight=1)
+        self._stat_labels: dict[str, tk.Label] = {}
+        for column, (key, caption) in enumerate(
+            (("render", "渲染耗时"), ("fps", "实际帧率"), ("total", "累计帧数"))
+        ):
+            cell = tk.Frame(stats, bg=CARD_2, highlightthickness=1, highlightbackground=BORDER)
+            cell.grid(row=0, column=column, sticky="ew", padx=(0, 6) if column < 2 else (0, 0))
+            inner = tk.Frame(cell, bg=CARD_2)
+            inner.pack(fill="x", padx=10, pady=(7, 8))
+            self._label(inner, caption, size=8, color=MUTED, bg=CARD_2).pack(anchor="w")
+            value = self._label(inner, "—", size=13, color=TEXT, bold=True, bg=CARD_2)
+            value.pack(anchor="w")
+            self._stat_labels[key] = value
 
     # -- 右栏：内容与编辑 ---------------------------------------------- #
     def _build_editor_panel(self, parent: tk.Frame) -> None:
@@ -1775,6 +2152,7 @@ class App(tk.Tk):
                 ("＋ 二维码", "qrcode"),
                 ("＋ 天气", "weather"),
                 ("＋ 正在播放", "nowplaying"),
+                ("＋ 性能仪表盘", "dashboard"),
             )
         ):
             row_index, column_index = divmod(index, 3)
@@ -1992,7 +2370,7 @@ class App(tk.Tk):
         else:
             label += "  ✓ 已保存"
         self._path_label.configure(text=label)
-        title = "HydroHUD — TCOMAS LG600 开源控制台"
+        title = "HydroHUD — Aurora 水冷屏控制台"
         if self.project_path:
             title = f"HydroHUD — {os.path.basename(self.project_path)}"
         try:
@@ -2187,6 +2565,7 @@ class App(tk.Tk):
                 )
             else:
                 self._preview_render_label.configure(text="渲染 —")
+        self._update_stat_label("render", f"{elapsed_ms:.1f} ms" if elapsed_ms > 0 else "—")
         if kind == "err":
             self._set_status(f"预览渲染失败：{jpeg_error}", "warn")
             if self._jpeg_label is not None:
@@ -2203,6 +2582,15 @@ class App(tk.Tk):
         else:
             short = jpeg_error if len(jpeg_error) <= 60 else jpeg_error[:57] + "..."
             self._jpeg_label.configure(text=f"JPEG 超限：{short}", fg=ERR)
+
+    def _update_stat_label(self, key: str, text: str, color: str = TEXT) -> None:
+        label = getattr(self, "_stat_labels", {}).get(key)
+        if label is None:
+            return
+        try:
+            label.configure(text=text, fg=color)
+        except tk.TclError:
+            pass
 
     def _show_preview_image(self, source: Image.Image) -> None:
         self._last_frame_img = source
@@ -2247,7 +2635,7 @@ class App(tk.Tk):
         """窗口高度不足时压缩左栏提示与列表高度，避免关键控件被裁切。"""
         if event.widget is not self or self._tips_card is None:
             return
-        compact = event.height < 735
+        compact = event.height < 900
         if compact == self._compact_mode:
             return
         self._compact_mode = compact
@@ -2257,7 +2645,7 @@ class App(tk.Tk):
         else:
             self._tips_card.grid()
         if getattr(self, "_preset_list", None) is not None:
-            self._preset_list.configure(height=4 if compact else 8)
+            self._preset_list.configure(height=5 if compact else 8)
         if getattr(self, "_layer_list", None) is not None:
             self._layer_list.configure(height=4 if compact else 6)
 
@@ -2468,6 +2856,13 @@ class App(tk.Tk):
             return layers[self._layer_index]
         return None
 
+    def _layer_list_text(self, index: int, layer: dict) -> str:
+        """图层列表的一行：编号 + 描述，隐藏图层再加一个标记。"""
+        text = f"{index + 1}. {layer_label(layer)}"
+        if not layer.get("visible", True):
+            text += "  （已隐藏）"
+        return text
+
     def _refresh_layer_list(self) -> None:
         layers = self.scene.get("layers") or []
         index = self._layer_index
@@ -2477,7 +2872,7 @@ class App(tk.Tk):
         try:
             self._layer_list.delete(0, "end")
             for item_index, layer in enumerate(layers):
-                self._layer_list.insert("end", f"{item_index + 1}. {layer_label(layer)}")
+                self._layer_list.insert("end", self._layer_list_text(item_index, layer))
             if 0 <= index < len(layers):
                 self._layer_list.selection_set(index)
                 self._layer_list.activate(index)
@@ -2508,7 +2903,7 @@ class App(tk.Tk):
         self._suppress_layer_event = True
         try:
             self._layer_list.delete(index)
-            self._layer_list.insert(index, f"{index + 1}. {layer_label(layers[index])}")
+            self._layer_list.insert(index, self._layer_list_text(index, layers[index]))
             self._layer_list.selection_clear(0, "end")
             self._layer_list.selection_set(index)
         finally:
@@ -2744,6 +3139,32 @@ class App(tk.Tk):
                 "label_color": "#94A3B8",
                 "separator": " · ",
                 "placeholder": "未在播放",
+            }
+        elif kind == "dashboard":
+            layer = {
+                "type": "dashboard",
+                "title": "AURORA",
+                "x": 0.5,
+                "y": 0.5,
+                "w": 0.94,
+                "h": 0.94,
+                "cpu_metric": "cpu",
+                "gpu_metric": "gpu",
+                "cpu_temp_metric": "cpu_temp",
+                "gpu_temp_metric": "gpu_temp",
+                "extras": ["gpu_power", "gpu_clock", "ram", "gpu_mem"],
+                "cpu_color": "#38BDF8",
+                "gpu_color": "#A78BFA",
+                "accent": "#22D3EE",
+                "bg": "#0B1220",
+                "border": "#1E293B",
+                "text_color": "#E2E8F0",
+                "muted_color": "#94A3B8",
+                "size": 20,
+                "value_size": 64,
+                "show_header": True,
+                "show_history": True,
+                "show_extras": True,
             }
         else:
             return
@@ -3490,6 +3911,7 @@ class App(tk.Tk):
             "qrcode": "二维码",
             "weather": "天气",
             "nowplaying": "正在播放",
+            "dashboard": "性能仪表盘",
         }
         plugin_spec = self._plugin_spec_for(kind)
         plugin_params = plugin_spec.params if plugin_spec is not None else ()
@@ -3508,6 +3930,25 @@ class App(tk.Tk):
         grid.pack(fill="x")
         grid.columnconfigure(1, weight=1)
         row = 0
+
+        # 所有图层共用：关掉后渲染/推流不再绘制它，但图层仍留在列表里可随时打开。
+        self._grid_label(grid, row, "可见")
+        visible_var = tk.BooleanVar(value=bool(layer.get("visible", True)))
+        tk.Checkbutton(
+            grid,
+            text="在画面中显示这个图层",
+            variable=visible_var,
+            bg=CARD,
+            fg=TEXT,
+            activebackground=CARD,
+            activeforeground=TEXT,
+            selectcolor=ENTRY_BG,
+            highlightthickness=0,
+            bd=0,
+            font=(FONT_FAMILY, 9),
+            command=lambda: self._apply_layer_field("visible", bool(visible_var.get())),
+        ).grid(row=row, column=1, sticky="w", pady=2)
+        row += 1
 
         if kind == "text":
             self._grid_label(grid, row, "文本")
@@ -3877,6 +4318,104 @@ class App(tk.Tk):
             ).grid(row=row, column=1, sticky="w", pady=2)
             row += 1
 
+        elif kind == "dashboard":
+            self._grid_label(grid, row, "标题")
+            title_var = tk.StringVar(value=str(layer.get("title") or "AURORA"))
+            title_entry = ttk.Entry(grid, textvariable=title_var)
+            title_entry.grid(row=row, column=1, sticky="ew", pady=2)
+            title_var.trace_add(
+                "write",
+                lambda *_args, var=title_var: self._apply_layer_field("title", var.get()),
+            )
+            row += 1
+            for key, label_text, fallback in (
+                ("cpu_metric", "CPU 主数值", "cpu"),
+                ("gpu_metric", "GPU 主数值", "gpu"),
+                ("cpu_temp_metric", "CPU 温度", "cpu_temp"),
+                ("gpu_temp_metric", "GPU 温度", "gpu_temp"),
+            ):
+                self._grid_label(grid, row, label_text)
+                metric_var = tk.StringVar(value=_metric_text(str(layer.get(key) or fallback)))
+                combo = ttk.Combobox(
+                    grid,
+                    textvariable=metric_var,
+                    values=[_metric_text(item) for item in _SCENE_METRICS],
+                    state="readonly",
+                )
+                combo.grid(row=row, column=1, sticky="ew", pady=2)
+                combo.bind(
+                    "<<ComboboxSelected>>",
+                    lambda _event=None, var=metric_var, field=key, default=fallback: self._apply_layer_field(
+                        field,
+                        {_metric_text(item): item for item in _SCENE_METRICS}.get(
+                            var.get(), default
+                        ),
+                    ),
+                )
+                row += 1
+            self._grid_label(grid, row, "附加指标")
+            extras_holder = tk.Frame(grid, bg=CARD)
+            extras_holder.grid(row=row, column=1, sticky="ew", pady=2)
+            current_extras = [str(item) for item in (layer.get("extras") or [])]
+            extras_summary = self._label(
+                extras_holder,
+                " · ".join(_metric_text(item) for item in current_extras) or "未选择",
+                size=8,
+                color=TEXT,
+                wrap=200,
+            )
+            extras_summary.pack(side="left", fill="x", expand=True)
+
+            def choose_extras() -> None:
+                selected = self._ask_metrics(
+                    [str(item) for item in (layer.get("extras") or [])],
+                    title="附加指标（开关）",
+                    allow_empty=True,
+                )
+                if selected is None:
+                    return
+                self._apply_layer_field("extras", selected)
+                self._rebuild_layer_editor()
+
+            ttk.Button(
+                extras_holder, text="选择…", style="Small.TButton", command=choose_extras
+            ).pack(side="right")
+            row += 1
+            self._editor_scale_row(
+                grid, row, "宽度", _safe_float(layer.get("w"), 0.92, 0.2, 1.0), "w"
+            )
+            row += 1
+            self._editor_scale_row(
+                grid, row, "高度", _safe_float(layer.get("h"), 0.92, 0.2, 1.0), "h"
+            )
+            row += 1
+            self._grid_label(grid, row, "显示")
+            dashboard_holder = tk.Frame(grid, bg=CARD)
+            dashboard_holder.grid(row=row, column=1, sticky="w", pady=2)
+            for key, label_text, default in (
+                ("show_header", "标题栏", True),
+                ("show_history", "历史曲线", True),
+                ("show_extras", "附加指标", True),
+            ):
+                var = tk.BooleanVar(value=bool(layer.get(key, default)))
+                tk.Checkbutton(
+                    dashboard_holder,
+                    text=label_text,
+                    variable=var,
+                    bg=CARD,
+                    fg=TEXT,
+                    activebackground=CARD,
+                    activeforeground=TEXT,
+                    selectcolor=ENTRY_BG,
+                    highlightthickness=0,
+                    bd=0,
+                    font=(FONT_FAMILY, 9),
+                    command=lambda field=key, widget_var=var: self._apply_layer_field(
+                        field, bool(widget_var.get())
+                    ),
+                ).pack(side="left", padx=(0, 8))
+            row += 1
+
         if kind == "image":
             self._grid_label(grid, row, "缩放")
             scale_holder = tk.Frame(grid, bg=CARD)
@@ -4017,10 +4556,26 @@ class App(tk.Tk):
             label.configure(text=f"{value:.{digits}f}")
         self._apply_layer_field(key, round(value, digits))
 
-    def _ask_metrics(self, current: list[str]) -> list[str] | None:
-        """弹窗让用户勾选监控项；取消返回 ``None``。"""
+    def _available_metric_set(self) -> frozenset[str]:
+        """本机真正采得到值的指标；传感器模块缺失时返回空集（视为全部可用）。"""
+        if sensors_mod is None:
+            return frozenset()
+        try:
+            return frozenset(sensors_mod.available_metrics())
+        except Exception:  # noqa: BLE001 - 可用性探测失败时不置灰任何项
+            return frozenset()
+
+    def _ask_metrics(
+        self, current: list[str], *, title: str = "选择监控项", allow_empty: bool = False
+    ) -> list[str] | None:
+        """弹窗让用户勾选监控项；取消返回 ``None``。
+
+        本机采不到值的指标仍列出来但置灰并标注「本机不可用」，避免用户勾了却看到
+        一片「—」；``allow_empty`` 为真时允许清空（仪表盘的附加指标行可以一行都不显示）。
+        """
+        available = self._available_metric_set()
         dialog = tk.Toplevel(self)
-        dialog.title("选择监控项")
+        dialog.title(title)
         dialog.configure(bg=BG)
         dialog.transient(self)
         dialog.resizable(False, False)
@@ -4036,14 +4591,18 @@ class App(tk.Tk):
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
         variables: dict[str, tk.BooleanVar] = {}
         for index, metric in enumerate(_SCENE_METRICS):
+            usable = not available or metric in available
             var = tk.BooleanVar(value=metric in current)
             variables[metric] = var
-            tk.Checkbutton(
+            text = f"{_metric_text(metric)}  ({metric})"
+            if not usable:
+                text += " · 本机不可用"
+            checkbutton = tk.Checkbutton(
                 body,
-                text=f"{_metric_text(metric)}  ({metric})",
+                text=text,
                 variable=var,
                 bg=BG,
-                fg=TEXT,
+                fg=TEXT if usable else "#4B5563",
                 activebackground=BG,
                 activeforeground=TEXT,
                 selectcolor=ENTRY_BG,
@@ -4051,12 +4610,17 @@ class App(tk.Tk):
                 bd=0,
                 anchor="w",
                 font=(FONT_FAMILY, 9),
-            ).grid(row=1 + index // 2, column=index % 2, sticky="w", padx=(0, 18), pady=1)
+            )
+            checkbutton.grid(row=1 + index // 2, column=index % 2, sticky="w", padx=(0, 18), pady=1)
+            if not usable:
+                checkbutton.state(["disabled"])
         result: dict[str, list[str] | None] = {"value": None}
 
         def confirm() -> None:
             ordered = [metric for metric in _SCENE_METRICS if variables[metric].get()]
-            result["value"] = ordered or ["cpu"]
+            if not ordered and not allow_empty:
+                ordered = ["cpu"]
+            result["value"] = ordered
             dialog.destroy()
 
         buttons = tk.Frame(body, bg=BG)
@@ -4321,12 +4885,28 @@ class App(tk.Tk):
 
     def _set_connection(self, text: str, color: str) -> None:
         label = self._conn_label
-        if label is None:
-            return
-        try:
-            label.configure(text=text, fg=color)
-        except tk.TclError:
-            pass
+        if label is not None:
+            try:
+                label.configure(text=text, fg=color)
+            except tk.TclError:
+                pass
+        self._sync_connection_chips(text, color)
+
+    def _sync_connection_chips(self, text: str, color: str) -> None:
+        """顶栏设备胶囊与左侧栏指示灯跟随连接状态。"""
+        chip = getattr(self, "_chip_device", None)
+        if chip is not None:
+            short = text.replace("（未连接）", "").replace("（", " ").replace("）", "")
+            try:
+                chip.configure(text=short, fg=color)
+            except tk.TclError:
+                pass
+        dot = getattr(self, "_rail_dot", None)
+        if dot is not None:
+            try:
+                dot.configure(fg=color)
+            except tk.TclError:
+                pass
 
     def _on_detect(self) -> None:
         self._detect_device(auto=False)
@@ -4705,6 +5285,16 @@ class App(tk.Tk):
                 print(f"[smoke] 已推 {frames} 帧 · {fps:.1f} fps", flush=True)
             if self._frames_label is not None:
                 self._frames_label.configure(text=f"已推 {frames} 帧 · {fps:.1f} fps")
+            chip = getattr(self, "_chip_frames", None)
+            if chip is not None:
+                try:
+                    chip.configure(
+                        text=f"已推 {frames} 帧 · {fps:.1f} fps", fg=OK if fps > 0 else MUTED
+                    )
+                except tk.TclError:
+                    pass
+            self._update_stat_label("fps", f"{fps:.1f} FPS", OK if fps > 0 else MUTED)
+            self._update_stat_label("total", f"{frames:,}")
         elif kind == "control_reply":
             if self._device_reply is not None:
                 self._device_reply.configure(text=f"设备回复：{payload[0]}")

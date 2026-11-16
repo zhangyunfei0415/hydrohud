@@ -70,6 +70,7 @@ def main(argv: list[str] | None = None) -> int:
         "qrcode",
         "weather",
         "nowplaying",
+        "dashboard",
     ):
         check(f"添加图层 {kind}", lambda k=kind: _add_layer_silently(root_app, k))
 
@@ -110,6 +111,9 @@ def main(argv: list[str] | None = None) -> int:
 
     # 9) 本地 API token（不起服务）
     check("生成 API token", lambda: _token_text())
+
+    # 10) 仪表盘的「开关显示」：附加指标勾选 + 图层可见性
+    check("仪表盘开关指标", lambda: _check_dashboard_toggles(root_app))
 
     shot("final")
 
@@ -304,6 +308,46 @@ def _import_theme(app, shots: Path | None) -> None:
     with mock.patch("tkinter.filedialog.askopenfilename", lambda *a, **k: str(target)):
         app._on_import_theme()
     assert app.scene.get("layers"), "导入主题包后场景为空"
+
+
+def _check_dashboard_toggles(app) -> None:
+    """仪表盘的「换指标 / 关附加行 / 隐藏图层」三条路径都要真的影响渲染。"""
+    from unittest import mock
+
+    from hydrohud import render
+
+    app._load_preset("Aurora 仪表盘")
+    layers = app.scene.get("layers") or []
+    assert layers and layers[0].get("type") == "dashboard", "Aurora 预设里没有仪表盘图层"
+    app._layer_index = 0
+    app._rebuild_layer_editor()
+
+    # 附加指标是开关列表：清空后渲染结果必须真的变化（少掉底部行）
+    before = render.render_scene(app._snapshot_scene(), 0.0).tobytes()
+    with mock.patch.object(app, "_ask_metrics", lambda *a, **kw: []):
+        app._apply_layer_field("extras", [])
+    app._rebuild_layer_editor()
+    assert app._selected_layer().get("extras") == [], "附加指标没有清空"
+    after = render.render_scene(app._snapshot_scene(), 0.0).tobytes()
+    assert before != after, "清空附加指标后画面没有变化"
+
+    # 勾上 GPU 功耗 / 频率
+    for metric in ("gpu_power", "gpu_clock", "gpu_temp"):
+        app._apply_layer_field("extras", list(app._selected_layer().get("extras") or []) + [metric])
+    assert set(app._selected_layer().get("extras") or []) >= {"gpu_power", "gpu_clock", "gpu_temp"}
+
+    # 图层可见性开关：隐藏后画面必须回到只剩背景
+    app._rebuild_layer_editor()
+    assert "可见" in _widget_text(app._layer_editor), "编辑器里没有可见性开关"
+    app._apply_layer_field("visible", False)
+    app._refresh_layer_list()
+    assert "已隐藏" in str(app._layer_list.get(0)), "图层列表没有标记隐藏状态"
+    hidden = render.render_scene(app._snapshot_scene(), 0.0).tobytes()
+    assert hidden != after, "隐藏图层后画面没有变化"
+    app._apply_layer_field("visible", True)
+    app._refresh_layer_list()
+    assert "已隐藏" not in str(app._layer_list.get(0))
+    app._show_preview_image(render.render_scene(app._snapshot_scene(), 0.0))
 
 
 def _token_text() -> None:
