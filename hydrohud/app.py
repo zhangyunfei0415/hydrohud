@@ -1336,9 +1336,8 @@ class App(tk.Tk):
         )
         for glyph, caption, command in (
             ("◉", "设备", self._on_detect),
-            ("▶", "推送", self._on_start_stream),
-            ("⏹", "停止", self._on_stop_stream),
             ("▤", "预设", lambda: self._select_editor_tab(0)),
+            ("▣", "背景", lambda: self._select_editor_tab(1)),
             ("☰", "图层", lambda: self._select_editor_tab(2)),
             ("◐", "主题", self._on_open_preset_library),
             ("ⓘ", "关于", self._on_about),

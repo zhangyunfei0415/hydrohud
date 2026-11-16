@@ -115,6 +115,9 @@ def main(argv: list[str] | None = None) -> int:
     # 10) 仪表盘的「开关显示」：附加指标勾选 + 图层可见性
     check("仪表盘开关指标", lambda: _check_dashboard_toggles(root_app))
 
+    # 11) 推流按钮只保留底栏一份，左侧图标栏不再重复
+    check("推流按钮不重复", lambda: _check_rail_has_no_stream_buttons(root_app))
+
     shot("final")
 
     root_app.on_close()  # 内含 shutdown + destroy，之后不能再操作窗口
@@ -348,6 +351,16 @@ def _check_dashboard_toggles(app) -> None:
     app._refresh_layer_list()
     assert "已隐藏" not in str(app._layer_list.get(0))
     app._show_preview_image(render.render_scene(app._snapshot_scene(), 0.0))
+
+
+def _check_rail_has_no_stream_buttons(app) -> None:
+    """推流/停止只允许出现在底栏一份；左侧图标栏只做导航，避免重复入口。"""
+    rail_text = _widget_text(app._rail)
+    for word in ("推送", "停止"):
+        assert word not in rail_text, f"左侧图标栏里仍有「{word}」按钮，与底栏重复"
+    assert app._btn_start is not None and app._btn_stop is not None, "底栏推流按钮缺失"
+    assert "开始推送到屏幕" in str(app._btn_start.cget("text"))
+    assert "停止" in str(app._btn_stop.cget("text"))
 
 
 def _token_text() -> None:

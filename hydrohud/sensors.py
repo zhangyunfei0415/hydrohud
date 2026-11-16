@@ -205,6 +205,9 @@ _ACPI_THERMAL_COMMAND = (
 _ACPI_DESCRIPTION = "ACPI 热区（MSAcpi_ThermalZoneTemperature，主板传感器，不是 CPU 核心温度）"
 _ACPI_MIN_CELSIUS = 0.0
 _ACPI_MAX_CELSIUS = 120.0
+# 程序以 pythonw.exe 启动时没有控制台，子进程默认会自己开一个黑窗；
+# CREATE_NO_WINDOW 让 PowerShell 完全在后台跑。非 Windows 上该常量为 0。
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 _acpi_lock = threading.Lock()
 _acpi_celsius: float | None = None
@@ -1327,6 +1330,8 @@ def _acpi_thermal_celsius() -> float | None:
             text=True,
             timeout=_ACPI_THERMAL_TIMEOUT,
             check=False,
+            stdin=subprocess.DEVNULL,
+            creationflags=_CREATE_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
         return None

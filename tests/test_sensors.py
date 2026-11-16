@@ -589,9 +589,24 @@ def test_acpi_reader_converts_millikelvin_and_keeps_the_hottest_zone(monkeypatch
 def test_acpi_reader_rejects_implausible_readings(monkeypatch, stdout):
     monkeypatch.setattr(sensors, "_IS_WINDOWS", True)
     monkeypatch.setattr(
-        sensors, "subprocess", type("M", (), {"run": lambda *a, **k: _CompletedProcess(stdout)})
+        sensors.subprocess, "run", lambda *args, **kwargs: _CompletedProcess(stdout)
     )
     assert sensors._acpi_thermal_celsius() is None
+
+
+def test_acpi_reader_hides_the_child_console(monkeypatch):
+    """以 pythonw.exe 启动时没有控制台，子进程必须自带 CREATE_NO_WINDOW 才不弹黑窗。"""
+    monkeypatch.setattr(sensors, "_IS_WINDOWS", True)
+    captured: dict[str, object] = {}
+
+    def fake_run(*args, **kwargs):
+        captured.update(kwargs)
+        return _CompletedProcess("3000\n")
+
+    monkeypatch.setattr(sensors.subprocess, "run", fake_run)
+    assert sensors._acpi_thermal_celsius() == pytest.approx(3000 / 10.0 - 273.15)
+    assert captured["creationflags"] == sensors._CREATE_NO_WINDOW
+    assert captured["stdin"] is sensors.subprocess.DEVNULL
 
 
 def test_acpi_reader_survives_a_missing_powershell(monkeypatch):

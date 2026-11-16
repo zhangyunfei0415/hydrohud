@@ -22,7 +22,7 @@ v1.2.0 补上了「系统状态」这条主线（23 项指标、折线图/仪表
 | 工程 | `.hud.json` 工程文件；**12 个中文预设**（含 Aurora 仪表盘）；`.hudpack` 主题包（工程 + 素材 zip）；官方素材扫描导入 |
 | 自动化（v1.3） | 本地 HTTP API（`127.0.0.1:4780`，token + SSE `/events` + **WebSocket `/ws`**，附 `examples/homeassistant/`）+ `hudctl` CLI；图层插件（`%APPDATA%\HydroHUD\plugins`，**参数声明 + 自动表单 + 故障隔离**）；**社区预设库**（`presetslib.py`：远程 JSON 索引 + 离线缓存 + 一键安装） |
 | 常驻能力（v1.1） | 系统托盘、全局热键、工程轮播、拖放导入、界面状态记忆、开机自启开关、崩溃日志、休眠唤醒自动重连 |
-| 分发 | PyInstaller 单文件 exe（约 73 MB）；**981 项 pytest**；`tools/check_device.py` 硬件自检、`tools/verify_v11.py` / `verify_v13.py` 真机帧率回归、`tools/gui_check.py` 无人值守 GUI 自检（44 项） |
+| 分发 | PyInstaller 单文件 exe（约 73 MB）；**982 项 pytest**；`tools/check_device.py` 硬件自检、`tools/verify_v11.py` / `verify_v13.py` 真机帧率回归、`tools/gui_check.py` 无人值守 GUI 自检（45 项） |
 | 协议文档 | 仓库内 `docs/PROTOCOL.md`、`docs/LAYERS.md`、`docs/AUTOMATION.md`、`docs/PLUGINS.md`、`docs/LINUX.md` |
 
 已知没做的：flash 上传的真机验证、`0x18`/`0x1A`/`0x1E` 三个设置命令、LG700 型号、Linux 真机验证、多屏、代码签名、国际化。
@@ -181,7 +181,7 @@ v1.4.0 先落地了「平台化」里不依赖硬件的那一半：插件参数�
 
 | 项 | 现状 | 计划 |
 | --- | --- | --- |
-| 测试 | **981 项**（渲染 15 类图层 / 图表仪表 / 场景 / 传感器 / 分帧 / 编码 / 撤销重做 / 画布几何 / 插件参数与隔离 / 预设库 / API + WS / hudctl / 主题包 / 天气 / 捕捉 / 传输 / Linux 打包与 hidraw 后端 / 文档站装配与链接改写）；设备层用 `FakeTransport`、替身传输类与桩 `write_report` 覆盖报文序列 | ✅ CI 已强制（ubuntu + windows × Py 3.10/3.12/3.13 + black + ruff + 打包 + 文档站 `mkdocs build --strict`）；真机路径只能靠 `tools/check_device.py` / `verify_v11.py` / `verify_v13.py` / `gui_check.py`（40 项无人值守 GUI 自检） |
+| 测试 | **982 项**（渲染 15 类图层 / 图表仪表 / 场景 / 传感器 / 分帧 / 编码 / 撤销重做 / 画布几何 / 插件参数与隔离 / 预设库 / API + WS / hudctl / 主题包 / 天气 / 捕捉 / 传输 / Linux 打包与 hidraw 后端 / 文档站装配与链接改写）；设备层用 `FakeTransport`、替身传输类与桩 `write_report` 覆盖报文序列 | ✅ CI 已强制（ubuntu + windows × Py 3.10/3.12/3.13 + black + ruff + 打包 + 文档站 `mkdocs build --strict`）；真机路径只能靠 `tools/check_device.py` / `verify_v11.py` / `verify_v13.py` / `gui_check.py`（45 项无人值守 GUI 自检） |
 | exe 体积 | 72 MB（含 ffmpeg + numpy） | 提供 Lite 版（无视频，约 40 MB）；或把视频解码拆成可选插件 |
 | 首启动速度 | 单文件解包 1–2 s | 提供 one-folder 版本；或按需导入 imageio |
 | 类型与风格 | `black` 100 列 + `ruff`（`pyproject.toml` 共享配置，E4/E7/E9/F/W/I/UP/B 规则）全绿 | ✅ CI 已强制（`lint (black + ruff)` job） |
@@ -230,4 +230,4 @@ v1.4.0 先落地了「平台化」里不依赖硬件的那一半：插件参数�
 | 渲染 + 编码单帧耗时 | ≤ 8 ms（v1.2 实测：11 个预设 0.02–3.4 ms 渲染，含编码约 8–12 ms） |
 | 新用户成功上屏所需步骤 | ≤ 3 步（检测 → 选预设 → 开始） |
 | 未知错误导致的白屏/崩溃 | 0（全部转中文提示） |
-| 测试覆盖 | 每条协议路径至少一个用例；981 项全绿，`FakeTransport` 覆盖报文序列；文档站 `mkdocs build --strict` 不允许断链 |
+| 测试覆盖 | 每条协议路径至少一个用例；982 项全绿，`FakeTransport` 覆盖报文序列；文档站 `mkdocs build --strict` 不允许断链 |

@@ -137,7 +137,7 @@ Then in `hydrohud/render.py`: write `_draw_thermometer_layer(draw, layer, values
 ## 6. Commands
 
 ```powershell
-C:\Python314\python.exe -m pytest tests -q          # 981 tests, all pure-software
+C:\Python314\python.exe -m pytest tests -q          # 982 tests, all pure-software
 C:\Python314\python.exe -m black --line-length 100 hydrohud tests tools
 C:\Python314\python.exe -m ruff check hydrohud tests tools       # pyproject.toml holds the shared config
 C:\Python314\python.exe -m hydrohud                 # run from source
@@ -146,7 +146,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1 -Clean   # → dist\HydroHUD.
 C:\Python314\python.exe tools\check_device.py       # real hardware self-check
 C:\Python314\python.exe tools\verify_v11.py         # real-device fps regression (v1.1 scene)
 C:\Python314\python.exe -X utf8 tools\verify_v13.py  # real-device v1.3 scene: static + capture rounds
-C:\Python314\python.exe -X utf8 tools\gui_check.py  # headless GUI integration sweep (44 checks)
+C:\Python314\python.exe -X utf8 tools\gui_check.py  # headless GUI integration sweep (45 checks)
 C:\Python314\python.exe -X utf8 tools\render_previews.py    # regenerate preview/ + contact sheet
 C:\Python314\python.exe -X utf8 -m hydrohud.hudctl status   # CLI client for the local API (GUI must be running)
 C:\Python314\python.exe -X utf8 tools\build_docs.py --strict  # → build\docs-site\docs (site source tree)
