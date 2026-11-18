@@ -2020,16 +2020,21 @@ class App(tk.Tk):
             except tk.TclError:
                 pass
         hint = ""
+        hint_color = WARN
         try:
             description = sensors_mod.get_hub().describe()
         except Exception:  # noqa: BLE001 - 描述缺失不影响数值显示
             description = {}
+        cpu_temp_source = str(description.get("cpu_temp", {}).get("source") or "")
         if values.get("cpu_temp") is None:
-            hint = "CPU 温度读不到：装 LibreHardwareMonitor 开共享内存"
-        elif "ACPI" in str(description.get("cpu_temp", {}).get("source") or ""):
+            hint = "CPU 温度读不到：装 HWiNFO64，开「共享内存支持」并保持传感器窗口"
+        elif "HWiNFO" in cpu_temp_source:
+            hint = "CPU 温度 / 功耗 / 风扇来自 HWiNFO 共享内存"
+            hint_color = OK
+        elif "ACPI" in cpu_temp_source:
             hint = "CPU 温度取自 ACPI 主板传感器"
         try:
-            self._metric_hint.configure(text=hint)
+            self._metric_hint.configure(text=hint, fg=hint_color)
         except tk.TclError:
             pass
 

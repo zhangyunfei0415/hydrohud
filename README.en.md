@@ -233,7 +233,20 @@ Data sources and degradation:
 - **CPU / memory / disk / network**: ctypes calls straight into Win32 (`GetSystemTimes`, `GlobalMemoryStatusEx`, `GetDiskFreeSpaceExW`, `GetIfTable2`), preferring psutil when it is installed; neither path needs an extra install.
 - **GPU**: calls NVIDIA `nvml.dll` directly (usage, temperature, VRAM, power, fan, clock). Without an NVIDIA card or driver these metrics show "—" and nothing else is affected.
 - **CPU temperature / CPU power / fan speed**: read from the LibreHardwareMonitor / OpenHardwareMonitor / HWiNFO shared memory. **These need you to install and run one of those monitors in the background**; otherwise they show "—" (this project does not invent ACPI numbers).
+- **CPU frequency**: prefers HWiNFO's `Average Effective Clock` (a real effective clock that tracks load); without HWiNFO it uses `psutil.cpu_freq()`, which on Windows reports the **base clock** (a constant 3700 MHz here, unaffected by load) — the UI labels it "(base clock)".
 - Sampling is throttled to 0.5 s on a background thread and a frame only reads cached values — 3–4 ms steady-state, so 30 fps streaming is unaffected.
+
+### Getting real core temperature / power / fan from HWiNFO (v1.8)
+
+The free HWiNFO build is enough; three steps:
+
+1. Open HWiNFO64 → **Settings** → tick "Shared Memory Support" (`SensorsSM=1` under `[Settings]` in the INI).
+2. Start with **Sensors-only** and keep the sensor window open — the shared memory exists only while that window runs.
+3. Open HydroHUD; under the metric card it says "CPU temperature / power / fan come from HWiNFO shared memory".
+
+`cpu_temp` then becomes the CPU package temperature (`CPU Package`, or the hottest core when absent), `cpu_power` the package power, `fan` the CPU fan on the motherboard, and `cpu_freq` the effective clock. The free build limits shared memory to **12 hours of continuous running**; when it expires HWiNFO stops publishing and you re-tick the box — HWiNFO Pro has no such limit.
+
+> Why no command-line automation? HWiNFO's `-s` and friends are Pro-only and the free build shows "Command-line parameters are supported in HWiNFO64 Pro only.", so this project only reads the shared memory and never launches HWiNFO for you.
 
 ### How to use the new layers
 
@@ -356,7 +369,7 @@ HydroHUD/
 ├── packaging/linux/  udev rules, install script, desktop entry
 ├── ROADMAP.md        upcoming versions and experiments still to verify
 ├── AGENTS.md         porting and extension manual for coding agents
-├── tests/            pytest suite (1194 tests, all pure software, no hardware needed)
+├── tests/            pytest suite (1201 tests, all pure software, no hardware needed)
 ├── preview/          rendering previews of presets / backgrounds / v1.3 features (contact-sheet.png is the overview)
 ├── examples/         sample .hud.json projects + sample plugin + Home Assistant integration
 ├── assets/           icons and UI screenshots
@@ -375,7 +388,9 @@ HydroHUD/
 - **Windows is the fully supported platform**: streaming, device control, the tray, and hotkeys are only verified on Windows. The Linux hidraw backend is wired up (`Screen` / `Control` dispatch per platform), and udev rules, desktop entry, and install scripts are in [docs/LINUX.md](docs/LINUX.md), but **streaming on real Linux hardware has not been regression-tested**; macOS is not started.
 - Only the LG600 (PID 1520) is verified on hardware. The LG700 (`1A2C:151C`) is in the device table and assumed to use the same protocol, but has not been tested (see [docs/PROTOCOL.md](docs/PROTOCOL.md)).
 - Per-frame limit of 46920 bytes: a quality-100 photo (about 42–46 KB, right at the budget) goes up unchanged; only pathological material such as per-pixel noise is forced to a lower quality.
-- CPU temperature: prefer the LHM / HWiNFO shared memory (core temperature); when neither is available it falls back to the ACPI thermal zone (a motherboard sensor, useful for order of magnitude, and the UI names the source). CPU power and fan speed only come from shared memory and show "—" when it is missing.
+- CPU temperature: prefer the HWiNFO / LHM / OHM shared memory (core temperature); when none is available it falls back to the ACPI thermal zone (a motherboard sensor, useful for order of magnitude, and the UI names the source). CPU power and fan speed only come from shared memory and show "—" when it is missing.
+- CPU frequency: with HWiNFO it uses `Average Effective Clock` (a real effective clock); otherwise `psutil.cpu_freq()`, which on Windows is only the **base clock** and does not track load (the UI labels it "(base clock)").
+- HWiNFO's free build limits shared memory to 12 hours of continuous running; afterwards HWiNFO stops publishing and `cpu_temp` falls back to ACPI until you re-tick "Shared Memory Support".
 - Chart history lives in memory only (120 samples by default, one per 0.5 s ≈ 1 minute) and restarts from zero on launch.
 - Video needs ffmpeg: `pip install imageio imageio-ffmpeg`; the packaged build already bundles it.
 - "Now playing" needs `pip install winsdk` (an optional dependency, not in requirements.txt); without it the layer shows placeholder text and everything else keeps working.

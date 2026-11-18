@@ -400,6 +400,8 @@
 
 `cpu_temp` 的取值顺序：LHM / OHM 共享内存 → HWiNFO SM2 共享内存 → **ACPI 热区兜底**（`MSAcpi_ThermalZoneTemperature`，取最热的一个热区）。前两者读的是 CPU 核心温度；ACPI 热区贴的是主板，只是量级参考，界面里会在指标卡下方注明「CPU 温度取自 ACPI 主板传感器」。`cpu_power` 与 `fan` 只能来自共享内存，没有 ACPI 兜底。
 
+`cpu_freq` 的取值顺序：HWiNFO 的 `Average Effective Clock`（真实有效频率）→ `psutil.cpu_freq()`（Windows 上只是基准频率，界面标注「基准频率」）→ 注册表 `~MHz`。HWiNFO SM2 的布局（`Global\HWiNFO_SENS_SM2`，magic `HWiS`，头部 44 字节，sensor 元素 392 字节、reading 元素 460 字节，数值在 reading 的 `+284` 处是 little-endian double）已按实测重写，判别类型靠 reading 的 `+0` 处 `readingType`（1 温度 / 3 风扇 RPM / 5 功耗 / 6 频率 MHz），**不能靠单位串**——中文系统上摄氏度是 GBK 双字节 `b"\xa1\xe6"`。免费版共享内存有 12 小时连续运行限制。
+
 ## 注意事项
 - `weather` 需要网络（Open-Meteo，无需 key）；离线或请求失败时继续显示上次缓存，从未成功时显示「天气 —」。
 - `nowplaying` 需要 `pip install winsdk`（Windows 10 1809+ 的 SMTC）；未安装或没有播放会话时显示 `placeholder`（默认「未在播放」）。

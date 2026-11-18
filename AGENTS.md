@@ -44,7 +44,7 @@ HydroHUD is an open-source controller for the **TCOMAS LG600** AIO liquid cooler
 | `device.py` | HID enumeration, packet framing, JPEG encoding, `Screen`, `Control` (incl. flash upload), vendor-process handling, device-table lookup (`detected_spec`/`describe_panel`), multi-panel identity (`PanelInfo`/`enumerate_panels`/`find_panel` via the USB composite instance id) | Tk, scenes, sensors |
 | `render.py` | scene dict → `PIL.Image`; layer painters (15 types), background painters (solid/image/gif/video/**capture**), LRU caches, plugin dispatch for unknown layer types | device, Tk |
 | `scenes.py` | schema defaults/validation (`normalize_scene`), 12 presets, `.hud.json` load/save | device, Tk |
-| `sensors.py` | 23 metrics, `SensorHub` (0.5 s throttle + 120-sample history), NVML / Win32 / LHM-shared-memory backends | Tk, device |
+| `sensors.py` | 23 metrics, `SensorHub` (0.5 s throttle + 120-sample history), NVML / Win32 / LHM / HWiNFO-SM2 shared-memory backends | Tk, device |
 | `app.py` | everything UI: layout, editor, stream loop with absolute-deadline pacing, tray/hotkeys/playlist wiring, API `Host` adapter, history/canvas-editor glue | protocol details |
 | `history.py` | undo/redo stack (deep-copied snapshots, coalescing, dirty tracking) | Tk, device |
 | `editor.py` | canvas editor geometry: `layer_bounds`/`hit_test`/`snap_offset`/`drag_selection`/`resize_layer` as pure functions + a thin `tk.Frame` wrapper | app state, device |
@@ -139,7 +139,7 @@ Then in `hydrohud/render.py`: write `_draw_thermometer_layer(draw, layer, values
 ## 6. Commands
 
 ```powershell
-C:\Python314\python.exe -m pytest tests -q          # 1194 tests, all pure-software
+C:\Python314\python.exe -m pytest tests -q          # 1201 tests, all pure-software
 C:\Python314\python.exe -m black --line-length 100 hydrohud tests tools
 C:\Python314\python.exe -m ruff check hydrohud tests tools       # pyproject.toml holds the shared config
 C:\Python314\python.exe -m hydrohud                 # run from source

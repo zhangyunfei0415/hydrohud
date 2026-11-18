@@ -466,53 +466,114 @@ def test_parse_ohm_buffer_rejects_garbage():
     assert sensors._parse_ohm_buffer(truncated) == {}
 
 
-def _hwinfo_entry(label: str, unit: str, value: float) -> bytes:
-    """构造 HWiNFO SM2 的一个 entry（label[128] + unit[16] + value_type + pad + double）。"""
-    return (
-        label.encode("utf-8").ljust(128, b"\x00")
-        + unit.encode("utf-8").ljust(16, b"\x00")
-        + struct.pack("<i", 2)
-        + b"\x00" * 4
-        + struct.pack("<d", value)
-        + b"\x00" * 8
-    )
+_HWINFO_SENSOR_ELEMENT_SIZE = 392
+_HWINFO_READING_ELEMENT_SIZE = 460
 
 
 def _hwinfo_sensor(name: str) -> bytes:
-    """构造 HWiNFO SM2 的一个 sensor：``name[128]`` + 4 个 dword 字段。"""
-    return name.encode("utf-8").ljust(128, b"\x00") + struct.pack("<3I", 1, 0, 0)
+    """构造 HWiNFO SM2 的一个 sensor 元素（type + 空位 + name[128] + 补齐）。"""
+    blob = struct.pack("<2I", 0xF0000300, 0) + name.encode("ascii").ljust(128, b"\x00")
+    assert _HWINFO_SENSOR_ELEMENT_SIZE >= len(blob)
+    return blob.ljust(_HWINFO_SENSOR_ELEMENT_SIZE, b"\x00")
+
+
+def _hwinfo_reading(
+    reading_type: int,
+    sensor_index: int,
+    label: str,
+    unit: str | bytes,
+    value: float,
+) -> bytes:
+    """构造 HWiNFO SM2 的一条读数（type/sensor/id + label[128] + unit[16] + double）。
+
+    单位按原始字节写入：中文系统上度符号是 GBK 双字节 ``b"\\xa1\\xe6"``，
+    解析器只能靠 ``reading_type`` 判别类型，不能依赖单位串。
+    """
+    raw_unit = unit.encode("ascii") if isinstance(unit, str) else unit
+    blob = (
+        struct.pack("<3I", reading_type, sensor_index, 0x08000000 + reading_type)
+        + label.encode("ascii").ljust(128, b"\x00")
+        + b"\x00" * 128
+        + raw_unit.ljust(16, b"\x00")
+        + struct.pack("<d", value)
+    )
+    assert _HWINFO_READING_ELEMENT_SIZE >= len(blob)
+    return blob.ljust(_HWINFO_READING_ELEMENT_SIZE, b"\x00")
+
+
+def _hwinfo_buffer(sensors_blob: list[bytes], readings_blob: list[bytes]) -> bytes:
+    """按实测布局拼出 SM2 缓冲区：magic + version/revision + int64 poll_time + 两个数组。"""
+    sensor_offset = 44
+    sensor_size = _HWINFO_SENSOR_ELEMENT_SIZE
+    entry_offset = sensor_offset + len(sensors_blob) * sensor_size
+    entry_size = _HWINFO_READING_ELEMENT_SIZE
+    header = (
+        b"HWiS"
+        + struct.pack("<2I", 2, 1)
+        + struct.pack("<q", 1_700_000_000)
+        + struct.pack("<3I", sensor_offset, sensor_size, len(sensors_blob))
+        + struct.pack("<3I", entry_offset, entry_size, len(readings_blob))
+    )
+    return header.ljust(44, b"\x00") + b"".join(sensors_blob) + b"".join(readings_blob)
 
 
 def test_parse_hwinfo_buffer_reads_cpu_entries():
-    entries = [
-        _hwinfo_entry("CPU Package", "°C", 62.0),
-        _hwinfo_entry("CPU Package Power", "W", 95.5),
-        _hwinfo_entry("CPU Fan", "RPM", 1300.0),
-        _hwinfo_entry("GPU Temperature", "°C", 45.0),
+    cpu = _hwinfo_sensor("CPU [#0]: Test CPU")
+    gpu = _hwinfo_sensor("dGPU [#2]: Test GPU")
+    readings = [
+        _hwinfo_reading(1, 0, "CPU Package", b"\xa1\xe6", 62.0),
+        _hwinfo_reading(1, 0, "P-core 0", b"\xa1\xe6", 55.0),
+        _hwinfo_reading(5, 0, "CPU Package Power", "W", 95.5),
+        _hwinfo_reading(3, 0, "CPU", "RPM", 1300.0),
+        _hwinfo_reading(3, 0, "System 1", "RPM", 900.0),
+        _hwinfo_reading(6, 0, "Average Effective Clock", "MHz", 4200.0),
+        _hwinfo_reading(1, 1, "GPU Temperature", b"\xa1\xe6", 45.0),
     ]
-    entry_size = len(entries[0])
-    sensor_blob = _hwinfo_sensor("CPU [#0]")
-    sensor_offset = 40
-    sensor_size = len(sensor_blob)
-    entry_offset = sensor_offset + sensor_size
-    header = b"HWiS" + struct.pack(
-        "<9I",
-        2,
-        0,
-        1000,
-        sensor_offset,
-        sensor_size,
-        1,
-        entry_offset,
-        entry_size,
-        len(entries),
-    )
-    buffer = header.ljust(40, b"\x00") + sensor_blob + b"".join(entries)
-    found = sensors._parse_hwinfo_buffer(buffer)
+    found = sensors._parse_hwinfo_buffer(_hwinfo_buffer([cpu, gpu], readings))
     assert found["cpu_temp"] == pytest.approx(62.0)
     assert found["cpu_power"] == pytest.approx(95.5)
     assert found["fan"] == pytest.approx(1300.0)
+    assert found["cpu_freq"] == pytest.approx(4200.0)
     assert "gpu_temp" not in found
+
+
+def test_parse_hwinfo_buffer_falls_back_to_hottest_core():
+    """没有 CPU Package 时取最热的核心；Distance to TjMAX 不能当成温度。"""
+    cpu = _hwinfo_sensor("CPU [#0]: Test CPU")
+    readings = [
+        _hwinfo_reading(1, 0, "P-core 0", b"\xa1\xe6", 51.0),
+        _hwinfo_reading(1, 0, "E-core 2", b"\xa1\xe6", 63.0),
+        _hwinfo_reading(1, 0, "P-core 0 Distance to TjMAX", b"\xa1\xe6", 50.0),
+    ]
+    found = sensors._parse_hwinfo_buffer(_hwinfo_buffer([cpu], readings))
+    assert found["cpu_temp"] == pytest.approx(63.0)
+
+
+def test_parse_hwinfo_buffer_ignores_power_and_frequency_limits():
+    """PL1/PL2 之类的配置值不能被当成实测功耗，核数时钟不能当成有效频率。"""
+    cpu = _hwinfo_sensor("CPU [#0]: Test CPU")
+    readings = [
+        _hwinfo_reading(5, 0, "PL1 Power Limit (Static)", "W", 250.0),
+        _hwinfo_reading(6, 0, "P-core 0 Clock", "MHz", 5600.0),
+        _hwinfo_reading(6, 0, "P-core 1 Clock", "MHz", 4600.0),
+    ]
+    found = sensors._parse_hwinfo_buffer(_hwinfo_buffer([cpu], readings))
+    assert "cpu_power" not in found
+    assert found["cpu_freq"] == pytest.approx(5100.0)
+
+
+def test_parse_hwinfo_buffer_uses_the_8_byte_poll_time():
+    """头部 poll_time 是 int64：按 9 个 u32 从偏移 4 解析会整体错位一格。"""
+    cpu = _hwinfo_sensor("CPU [#0]: Test CPU")
+    buffer = _hwinfo_buffer([cpu], [_hwinfo_reading(1, 0, "CPU Package", b"\xa1\xe6", 60.0)])
+    layout = sensors._hwinfo_layout(buffer)
+    assert layout is not None
+    assert layout.sensor_offset == 44
+    assert layout.sensor_count == 1
+    assert layout.entry_size == _HWINFO_READING_ELEMENT_SIZE
+    assert layout.poll_time == 1_700_000_000
+    assert sensors._hwinfo_bytes_needed(buffer) == len(buffer)
+    assert sensors._parse_hwinfo_buffer(buffer)["cpu_temp"] == pytest.approx(60.0)
 
 
 @pytest.mark.parametrize(
@@ -521,14 +582,66 @@ def test_parse_hwinfo_buffer_reads_cpu_entries():
         b"",
         b"not-hwinfo-mapping",
         b"HWiS" + b"\x00" * 20,
-        b"HWiS" + struct.pack("<9I", 2, 0, 0, 0, 0, 99999, 0, 0, 0),
+        b"HWiS"
+        + struct.pack("<2I", 2, 1)
+        + struct.pack("<q", 1)
+        + struct.pack("<6I", 0, 0, 99999, 0, 0, 0),
+        # 数组互相重叠 / 尺寸过小：布局不自洽
+        b"HWiS"
+        + struct.pack("<2I", 2, 1)
+        + struct.pack("<q", 1)
+        + struct.pack("<3I", 44, 8, 2)
+        + struct.pack("<3I", 44, 8, 2),
+        # 声称的字节数超过上限
+        b"HWiS"
+        + struct.pack("<2I", 2, 1)
+        + struct.pack("<q", 1)
+        + struct.pack("<3I", 44, 392, 512)
+        + struct.pack("<3I", 44 + 512 * 392, 460, 8192),
     ],
 )
 def test_parse_hwinfo_buffer_rejects_unexpected_layout(buffer):
     assert sensors._parse_hwinfo_buffer(buffer) == {}
 
 
-def test_read_thermal_returns_none_without_shared_memory(monkeypatch):
+def test_read_thermal_keeps_the_effective_clock_for_cpu_freq(monkeypatch):
+    """共享内存里的有效频率要存进 state.shared，供紧随其后的 cpu_freq 直接用。"""
+    monkeypatch.setattr(sensors, "_read_lhm", lambda: {})
+    monkeypatch.setattr(sensors, "_read_hwinfo", lambda: {"cpu_temp": 55.0, "cpu_freq": 4210.0})
+    monkeypatch.setattr(sensors, "_psutil", lambda: None)
+    state = sensors._SampleState()
+    sensors._read_thermal(state)
+    assert state.shared["cpu_freq"] == pytest.approx(4210.0)
+    assert "有效频率" in state.sources["cpu_freq"]
+    assert sensors._read_cpu_freq(state) == pytest.approx(4210.0)
+
+
+def test_read_cpu_freq_labels_psutil_as_the_base_clock(monkeypatch):
+    """没有共享内存时退回 psutil，必须标注这是基准频率而不是实时频率。"""
+
+    class _Frequency:
+        current = 3700.0
+
+    class _FakePsutil:
+        @staticmethod
+        def cpu_freq():
+            return _Frequency()
+
+    monkeypatch.setattr(sensors, "_psutil", lambda: _FakePsutil())
+    state = sensors._SampleState()
+    assert sensors._read_cpu_freq(state) == pytest.approx(3700.0)
+    assert "基准频率" in state.sources["cpu_freq"]
+
+
+def test_read_thermal_prefers_lhm_for_temperature_but_hwinfo_for_frequency(monkeypatch):
+    """LHM 有温度时温度用它，但有效频率仍可由 HWiNFO 补上。"""
+    monkeypatch.setattr(sensors, "_read_lhm", lambda: {"cpu_temp": 60.0})
+    monkeypatch.setattr(sensors, "_read_hwinfo", lambda: {"cpu_temp": 99.0, "cpu_freq": 3900.0})
+    state = sensors._SampleState()
+    values = sensors._read_thermal(state)
+    assert values["cpu_temp"] == pytest.approx(60.0)
+    assert state.shared["cpu_freq"] == pytest.approx(3900.0)
+
     monkeypatch.setattr(sensors, "_read_lhm", lambda: {})
     monkeypatch.setattr(sensors, "_read_hwinfo", lambda: {})
     monkeypatch.setattr(sensors, "_acpi_thermal_value", lambda: (None, sensors._NO_SHARED_MEMORY))

@@ -52,6 +52,8 @@ import sys
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 __all__ = [
@@ -665,19 +667,33 @@ _OHM_MAX_SENSORS = 1024
 
 _HWINFO_MAPPING = r"Global\HWiNFO_SENS_SM2"
 _HWINFO_MAGIC = b"HWiS"
-_HWINFO_HEADER_SIZE = 40
+# 头部 44 字节：magic[4] · version u32 · revision u32 · poll_time int64 ·
+# sensor_offset/size/count u32×3 · entry_offset/size/count u32×3。
+# poll_time 是 __time64_t（8 字节）。按 9 个 u32 从偏移 4 解析会整体错位一格，
+# 读出的 sensor_count 变成 392 而直接放弃整块缓冲区 —— 那正是「HWiNFO 明明开着
+# 共享内存却一直显示 —」的根因。
+_HWINFO_HEADER_SIZE = 44
+_HWINFO_HEADER_READ = 64
+_HWINFO_SENSOR_BLOCK_OFFSET = 20
+_HWINFO_ENTRY_BLOCK_OFFSET = 32
+_HWINFO_SENSOR_NAME_OFFSET = 8
 _HWINFO_SENSOR_NAME_SIZE = 128
-_HWINFO_SENSOR_MIN_SIZE = _HWINFO_SENSOR_NAME_SIZE + 4
+_HWINFO_SENSOR_MIN_SIZE = _HWINFO_SENSOR_NAME_OFFSET + _HWINFO_SENSOR_NAME_SIZE
+_HWINFO_ENTRY_SENSOR_OFFSET = 4
+_HWINFO_ENTRY_LABEL_OFFSET = 12
 _HWINFO_ENTRY_LABEL_SIZE = 128
-_HWINFO_ENTRY_UNIT_OFFSET = _HWINFO_ENTRY_LABEL_SIZE
+_HWINFO_ENTRY_UNIT_OFFSET = 268
 _HWINFO_ENTRY_UNIT_SIZE = 16
-_HWINFO_ENTRY_VALUE_TYPE_OFFSET = _HWINFO_ENTRY_UNIT_OFFSET + _HWINFO_ENTRY_UNIT_SIZE
-_HWINFO_ENTRY_VALUE_OFFSET = _HWINFO_ENTRY_VALUE_TYPE_OFFSET + 8
+_HWINFO_ENTRY_VALUE_OFFSET = 284
 _HWINFO_ENTRY_MIN_SIZE = _HWINFO_ENTRY_VALUE_OFFSET + 8
-_HWINFO_VALUE_TYPE_INT = 1
-_HWINFO_VALUE_TYPE_DOUBLE = 2
-_HWINFO_MAX_SENSORS = 64
-_HWINFO_MAX_ENTRIES = 4096
+_HWINFO_MAX_SENSORS = 512
+_HWINFO_MAX_ENTRIES = 8192
+_HWINFO_MAX_READ_BYTES = 4 * 1024 * 1024
+#: reading type 跨语言稳定；单位串在中文系统上是 GBK 的 ``℃``，不能拿来判断类型。
+_HWINFO_TYPE_TEMPERATURE = 1
+_HWINFO_TYPE_FAN = 3
+_HWINFO_TYPE_POWER = 5
+_HWINFO_TYPE_CLOCK = 6
 
 _SHARED_MAPPING_READY = False
 
@@ -713,8 +729,18 @@ def _configure_shared_mapping() -> None:
     _SHARED_MAPPING_READY = True
 
 
-def _read_shared_mapping(name: str) -> bytes | None:
-    """打开命名共享内存并整块读回；不存在或失败返回 ``None``。"""
+def _read_shared_mapping(
+    name: str,
+    *,
+    prefix: int = 0,
+    total_of: Callable[[bytes], int | None] | None = None,
+    limit: int = _MAX_MAPPING_READ,
+) -> bytes | None:
+    """打开命名共享内存并读回；不存在或失败返回 ``None``。
+
+    HWiNFO 的 SM2 映射固定 8 MiB，但只有前几百 KB 是真数据。传 ``prefix`` 与
+    ``total_of`` 可以先读头部、再由头部算出需要的字节数，避免每次采样都拷 8 MiB。
+    """
     if not _IS_WINDOWS:
         return None
     try:
@@ -737,7 +763,14 @@ def _read_shared_mapping(name: str) -> bytes | None:
         written = kernel32.VirtualQuery(address, ctypes.byref(info), ctypes.sizeof(info))
         if not written or not info.RegionSize:
             return None
-        return ctypes.string_at(address, min(int(info.RegionSize), _MAX_MAPPING_READ))
+        region = min(int(info.RegionSize), limit)
+        if prefix <= 0 or prefix >= region or total_of is None:
+            return ctypes.string_at(address, region)
+        head = ctypes.string_at(address, min(prefix, region))
+        wanted = total_of(head)
+        if not wanted:
+            return None
+        return ctypes.string_at(address, min(max(int(wanted), prefix), region))
     except (AttributeError, OSError, ValueError):
         return None
     finally:
@@ -833,77 +866,213 @@ def _classify_ohm_identifier(identifier: str) -> str | None:
     return None
 
 
-def _hwinfo_entry_value(buffer: bytes, base: int, value_type: int) -> float | None:
-    """按 HWiNFO SM2 的 value_type 读取一个 entry 的数值。"""
+@dataclass(frozen=True)
+class _HwinfoLayout:
+    """SM2 头部里描述两个数组位置与长度的字段。"""
+
+    poll_time: int
+    sensor_offset: int
+    sensor_size: int
+    sensor_count: int
+    entry_offset: int
+    entry_size: int
+    entry_count: int
+
+    def bytes_needed(self) -> int:
+        """本次采样实际要读的字节数（两块数组的末尾）。"""
+        sensor_end = self.sensor_offset + self.sensor_count * self.sensor_size
+        entry_end = self.entry_offset + self.entry_count * self.entry_size
+        return max(self.sensor_offset, sensor_end, entry_end)
+
+
+@dataclass(frozen=True)
+class _HwinfoReading:
+    """SM2 里一条读数：类型 + 所属传感器 + 名字 + 单位 + 数值。"""
+
+    reading_type: int
+    sensor_index: int
+    label: str
+    unit: str
+    value: float
+
+
+def _hwinfo_layout(buffer: bytes) -> _HwinfoLayout | None:
+    """解析并校验 SM2 头部；magic 或长度不自洽时返回 ``None``。"""
+    if len(buffer) < _HWINFO_HEADER_SIZE or buffer[: len(_HWINFO_MAGIC)] != _HWINFO_MAGIC:
+        return None
+    sensor_offset, sensor_size, sensor_count = struct.unpack_from(
+        "<3I", buffer, _HWINFO_SENSOR_BLOCK_OFFSET
+    )
+    entry_offset, entry_size, entry_count = struct.unpack_from(
+        "<3I", buffer, _HWINFO_ENTRY_BLOCK_OFFSET
+    )
+    if not 0 < sensor_count <= _HWINFO_MAX_SENSORS:
+        return None
+    if not 0 < entry_count <= _HWINFO_MAX_ENTRIES:
+        return None
+    if sensor_size < _HWINFO_SENSOR_MIN_SIZE or entry_size < _HWINFO_ENTRY_MIN_SIZE:
+        return None
+    if sensor_offset < _HWINFO_HEADER_SIZE or entry_offset < _HWINFO_HEADER_SIZE:
+        return None
+    layout = _HwinfoLayout(
+        poll_time=struct.unpack_from("<q", buffer, 12)[0],
+        sensor_offset=sensor_offset,
+        sensor_size=sensor_size,
+        sensor_count=sensor_count,
+        entry_offset=entry_offset,
+        entry_size=entry_size,
+        entry_count=entry_count,
+    )
+    if layout.bytes_needed() > _HWINFO_MAX_READ_BYTES:
+        return None
+    return layout
+
+
+def _hwinfo_sensor_names(buffer: bytes, layout: _HwinfoLayout) -> tuple[str, ...]:
+    """读取每个传感器的名字（``labelOrig``，恒为 ASCII）。"""
+    names = []
+    for index in range(layout.sensor_count):
+        base = layout.sensor_offset + index * layout.sensor_size
+        names.append(
+            _decode_cstr(buffer[base + _HWINFO_SENSOR_NAME_OFFSET : base + _HWINFO_SENSOR_MIN_SIZE])
+        )
+    return tuple(names)
+
+
+def _hwinfo_reading(
+    buffer: bytes, layout: _HwinfoLayout, index: int, sensor_count: int
+) -> _HwinfoReading | None:
+    """读取第 ``index`` 条读数；越界或数值非有限时返回 ``None``。"""
+    base = layout.entry_offset + index * layout.entry_size
+    if base + _HWINFO_ENTRY_MIN_SIZE > len(buffer):
+        return None
+    reading_type, sensor_index = struct.unpack_from("<2I", buffer, base)
+    if sensor_index >= sensor_count:
+        return None
     try:
-        if value_type == _HWINFO_VALUE_TYPE_DOUBLE:
-            value = struct.unpack_from("<d", buffer, base + _HWINFO_ENTRY_VALUE_OFFSET)[0]
-        elif value_type == _HWINFO_VALUE_TYPE_INT:
-            value = float(struct.unpack_from("<q", buffer, base + _HWINFO_ENTRY_VALUE_OFFSET)[0])
-        else:
-            return None
+        value = struct.unpack_from("<d", buffer, base + _HWINFO_ENTRY_VALUE_OFFSET)[0]
     except struct.error:
         return None
-    return float(value) if math.isfinite(value) else None
+    if not math.isfinite(value):
+        return None
+    return _HwinfoReading(
+        reading_type=reading_type,
+        sensor_index=sensor_index,
+        label=_decode_cstr(
+            buffer[
+                base
+                + _HWINFO_ENTRY_LABEL_OFFSET : base
+                + _HWINFO_ENTRY_LABEL_OFFSET
+                + _HWINFO_ENTRY_LABEL_SIZE
+            ]
+        ),
+        unit=_decode_cstr(
+            buffer[
+                base
+                + _HWINFO_ENTRY_UNIT_OFFSET : base
+                + _HWINFO_ENTRY_UNIT_OFFSET
+                + _HWINFO_ENTRY_UNIT_SIZE
+            ]
+        ),
+        value=float(value),
+    )
+
+
+def _hwinfo_plausible(metric: str, value: float) -> bool:
+    """丢弃明显越界的读数，避免把「Power Limit」之类的配置值当成实测值。"""
+    limits = {
+        "cpu_temp": (-40.0, 150.0),
+        "cpu_power": (0.0, 2000.0),
+        "fan": (0.0, 20000.0),
+        "cpu_freq": (100.0, 10000.0),
+    }
+    low, high = limits[metric]
+    return low <= value <= high
 
 
 def _parse_hwinfo_buffer(buffer: bytes) -> dict[str, float]:
-    """解析 HWiNFO SM2 共享内存；magic / 偏移不符预期返回空字典。
+    """解析 HWiNFO SM2 共享内存，返回 CPU 温度 / 功耗 / 风扇 / 实时频率。
 
-    只按 entry 的 label 含 ``CPU`` 且单位匹配来识别 CPU 温度 / 功耗 / 风扇，
-    不做任何猜测性替换。
+    ``readingType`` 是跨语言稳定的判别依据（1 温度 / 3 转速 / 5 功耗 / 6 频率）；
+    单位串在中文系统上是 GBK 的 ``℃``，不能拿来做判断。只有传感器名含 ``CPU``
+    的读数才参与温度 / 功耗 / 频率，风扇则允许来自主板的 ``CPU`` / ``CPU_OPT``
+    通道（风扇本身接在主板上，不在 CPU 传感器下）。
     """
     found: dict[str, float] = {}
-    if len(buffer) < _HWINFO_HEADER_SIZE or buffer[0:4] != _HWINFO_MAGIC:
+    layout = _hwinfo_layout(buffer)
+    if layout is None:
         return found
-    (
-        _version,
-        _revision,
-        _poll_time,
-        sensor_offset,
-        sensor_size,
-        sensor_count,
-        entry_offset,
-        entry_size,
-        entry_count,
-    ) = struct.unpack_from("<9I", buffer, 4)
-    if not 0 < sensor_count <= _HWINFO_MAX_SENSORS:
-        return found
-    if not 0 < entry_count <= _HWINFO_MAX_ENTRIES:
-        return found
-    if sensor_size < _HWINFO_SENSOR_MIN_SIZE or entry_size < _HWINFO_ENTRY_MIN_SIZE:
-        return found
-    if sensor_offset < _HWINFO_HEADER_SIZE:
-        return found
-    if sensor_offset + sensor_count * sensor_size > len(buffer):
-        return found
-    if entry_offset < _HWINFO_HEADER_SIZE:
-        return found
-    if entry_offset + entry_count * entry_size > len(buffer):
-        return found
-    for index in range(entry_count):
-        base = entry_offset + index * entry_size
-        label = _decode_cstr(buffer[base : base + _HWINFO_ENTRY_LABEL_SIZE])
-        if "cpu" not in label.lower():
+    names = _hwinfo_sensor_names(buffer, layout)
+    package_temp: float | None = None
+    core_max_temp: float | None = None
+    per_core_temps: list[float] = []
+    package_power: float | None = None
+    cores_power: float | None = None
+    effective_clock: float | None = None
+    core_clocks: list[float] = []
+    best_fan: tuple[int, float] | None = None
+    for index in range(layout.entry_count):
+        reading = _hwinfo_reading(buffer, layout, index, len(names))
+        if reading is None:
             continue
-        unit_base = base + _HWINFO_ENTRY_UNIT_OFFSET
-        unit = _decode_cstr(buffer[unit_base : unit_base + _HWINFO_ENTRY_UNIT_SIZE])
-        value_type = int.from_bytes(
-            buffer[
-                base + _HWINFO_ENTRY_VALUE_TYPE_OFFSET : base + _HWINFO_ENTRY_VALUE_TYPE_OFFSET + 4
-            ],
-            "little",
-        )
-        value = _hwinfo_entry_value(buffer, base, value_type)
-        if value is None:
+        label = reading.label.lower()
+        sensor = names[reading.sensor_index].lower()
+        if reading.reading_type == _HWINFO_TYPE_FAN:
+            # 风扇：只认标签明确写着 CPU 的通道；GPU 风扇归 NVML。
+            if "cpu" not in label or "gpu" in label or "gpu" in sensor:
+                continue
+            if label == "cpu":
+                priority = 3
+            elif label.startswith("cpu fan"):
+                priority = 2
+            elif label.startswith("cpu_opt"):
+                priority = 1
+            else:
+                continue
+            if best_fan is None or priority > best_fan[0]:
+                best_fan = (priority, reading.value)
             continue
-        unit_upper = unit.upper()
-        if "°C" in unit or unit_upper in ("C", "CELSIUS"):
-            found.setdefault("cpu_temp", value)
-        elif unit_upper == "W":
-            found.setdefault("cpu_power", value)
-        elif unit_upper == "RPM":
-            found.setdefault("fan", value)
+        if "cpu" not in sensor or "gpu" in sensor:
+            continue
+        if reading.reading_type == _HWINFO_TYPE_TEMPERATURE:
+            if "distance to tjmax" in label:
+                continue
+            if "package" in label:
+                package_temp = reading.value
+            elif "core max" in label:
+                core_max_temp = reading.value
+            else:
+                per_core_temps.append(reading.value)
+        elif reading.reading_type == _HWINFO_TYPE_POWER:
+            if "package power" in label:
+                package_power = reading.value
+            elif "cores power" in label and "ia " in label:
+                cores_power = reading.value
+        elif reading.reading_type == _HWINFO_TYPE_CLOCK:
+            if label == "average effective clock":
+                effective_clock = reading.value
+            elif label.endswith(" clock") and ("p-core" in label or "e-core" in label):
+                core_clocks.append(reading.value)
+    temperature = package_temp
+    if temperature is None:
+        temperature = core_max_temp
+    if temperature is None and per_core_temps:
+        temperature = max(per_core_temps)
+    if temperature is not None and _hwinfo_plausible("cpu_temp", temperature):
+        found["cpu_temp"] = temperature
+    power = package_power if package_power is not None else cores_power
+    if power is not None and _hwinfo_plausible("cpu_power", power):
+        found["cpu_power"] = power
+    if best_fan is not None and _hwinfo_plausible("fan", best_fan[1]):
+        found["fan"] = best_fan[1]
+    # 有效频率（effective clock）反映真实降频/睿频；Windows 的 psutil 只能给出
+    # 基准频率，所以有 HWiNFO 时用它。没有效频率就退到各核时钟的平均值。
+    frequency = effective_clock
+    if frequency is None and core_clocks:
+        active = [value for value in core_clocks if value > 0.0]
+        frequency = sum(active) / len(active) if active else None
+    if frequency is not None and _hwinfo_plausible("cpu_freq", frequency):
+        found["cpu_freq"] = frequency
     return found
 
 
@@ -915,6 +1084,7 @@ class _SampleState:
 
     def __init__(self) -> None:
         self.sources: dict[str, str] = {}
+        self.shared: dict[str, float] = {}
         self.cpu_times: tuple[int, int] | None = None
         self.disk_io: tuple[float, int, int] | None = None
         self.net_io: tuple[float, int, int] | None = None
@@ -974,7 +1144,14 @@ def _cpu_from_system_times(state: _SampleState) -> float | None:
 
 
 def _read_cpu_freq(state: _SampleState) -> float | None:
-    """CPU 当前频率（MHz）：psutil 优先，退回注册表 ``~MHz``。"""
+    """CPU 当前频率（MHz）：共享内存的有效频率优先，其次 psutil，最后注册表。
+
+    Windows 上 ``psutil.cpu_freq().current`` 只是基准频率（本机恒为 3700 MHz，
+    满载也不变），真正随负载变化的是 HWiNFO 的 ``Average Effective Clock``。
+    """
+    shared = state.shared.get("cpu_freq")
+    if shared is not None and shared > 0.0:
+        return float(shared)
     psutil = _psutil()
     if psutil is not None:
         try:
@@ -983,9 +1160,11 @@ def _read_cpu_freq(state: _SampleState) -> float | None:
             frequency = None
         current = getattr(frequency, "current", None) if frequency is not None else None
         if current:
-            state.sources["cpu_freq"] = "psutil.cpu_freq"
+            state.sources["cpu_freq"] = "psutil.cpu_freq（基准频率）"
             return float(current)
-    state.sources["cpu_freq"] = "注册表 HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0"
+    state.sources["cpu_freq"] = (
+        "注册表 HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0（基准频率）"
+    )
     return _cpu_freq_from_registry()
 
 
@@ -1283,25 +1462,35 @@ def _read_cores(state: _SampleState) -> float | None:
 
 
 def _read_thermal(state: _SampleState) -> dict[str, float | None]:
-    """CPU 温度 / CPU 功耗 / 风扇转速。
+    """CPU 温度 / CPU 功耗 / 风扇转速（顺带缓存共享内存里的实时频率）。
 
     温度先认 LHM/OHM 与 HWiNFO 共享内存（核心温度，最准）；都没有时回落到
     ACPI 热区（主板温度，量级参考）。``cpu_power`` 与 ``fan`` 只能来自共享内存。
+    共享内存里若还有 ``cpu_freq``（HWiNFO 的有效频率），一并存进
+    ``state.shared``，供 :func:`_read_cpu_freq` 覆盖 Windows 只能拿到的基准频率。
     """
     values: dict[str, float | None] = {"cpu_temp": None, "cpu_power": None, "fan": None}
     readers = (
         (_read_lhm, "LibreHardwareMonitor/OpenHardwareMonitor 共享内存"),
         (_read_hwinfo, "HWiNFO SM2 共享内存"),
     )
+    shared: dict[str, float] = {}
     for reader, description in readers:
         try:
             found = reader()
         except Exception:  # noqa: BLE001 - 解析失败即视为该后端不可用
             found = {}
         for metric, value in found.items():
-            if metric in values and values[metric] is None and value is not None:
-                values[metric] = float(value)
-                state.sources[metric] = description
+            if value is None:
+                continue
+            if metric in values:
+                if values[metric] is None:
+                    values[metric] = float(value)
+                    state.sources[metric] = description
+            elif metric == "cpu_freq" and metric not in shared:
+                shared[metric] = float(value)
+                state.sources[metric] = f"{description}（有效频率）"
+    state.shared = shared
     if values["cpu_temp"] is None:
         celsius, description = _acpi_thermal_value()
         if celsius is not None:
@@ -1403,8 +1592,17 @@ def _read_lhm() -> dict[str, float]:
 
 
 def _read_hwinfo() -> dict[str, float]:
-    """尝试 HWiNFO SM2 共享内存；不可用返回空字典。"""
-    buffer = _read_shared_mapping(_HWINFO_MAPPING)
+    """尝试 HWiNFO SM2 共享内存；不可用返回空字典。
+
+    映射固定 8 MiB 但只有前面一小段是数据，所以先读 64 字节头部拿到
+    ``entry_offset + entry_count * entry_size``，再只拷实际需要的那一段。
+    """
+    buffer = _read_shared_mapping(
+        _HWINFO_MAPPING,
+        prefix=_HWINFO_HEADER_READ,
+        total_of=_hwinfo_bytes_needed,
+        limit=_HWINFO_MAX_READ_BYTES,
+    )
     if not buffer:
         return {}
     try:
@@ -1413,20 +1611,42 @@ def _read_hwinfo() -> dict[str, float]:
         return {}
 
 
+def _hwinfo_bytes_needed(head: bytes) -> int | None:
+    """从 SM2 头部算出本次采样要读多少字节；头部不合法返回 ``None``。"""
+    if len(head) < _HWINFO_HEADER_SIZE or head[: len(_HWINFO_MAGIC)] != _HWINFO_MAGIC:
+        return None
+    sensor_offset, sensor_size, sensor_count = struct.unpack_from(
+        "<3I", head, _HWINFO_SENSOR_BLOCK_OFFSET
+    )
+    entry_offset, entry_size, entry_count = struct.unpack_from(
+        "<3I", head, _HWINFO_ENTRY_BLOCK_OFFSET
+    )
+    if not 0 < sensor_count <= _HWINFO_MAX_SENSORS or not 0 < entry_count <= _HWINFO_MAX_ENTRIES:
+        return None
+    if sensor_size < _HWINFO_SENSOR_MIN_SIZE or entry_size < _HWINFO_ENTRY_MIN_SIZE:
+        return None
+    sensor_end = sensor_offset + sensor_count * sensor_size
+    entry_end = entry_offset + entry_count * entry_size
+    needed = max(sensor_end, entry_end)
+    return needed if needed >= _HWINFO_HEADER_SIZE else None
+
+
 def _collect(state: _SampleState) -> dict[str, float | None]:
     """依次调用全部读取器；单个读取器抛异常只让它负责的 metric 保持 ``None``。"""
     state.sources = {}
     values: dict[str, float | None] = {metric: None for metric in METRIC_IDS}
     probes = (
         ("cpu", _read_cpu),
-        ("cpu_freq", _read_cpu_freq),
         ("ram", _read_ram),
         ("gpu", _read_gpu),
         ("disk", _read_disk),
         ("net", _read_net),
         ("uptime", _read_uptime),
         ("cpu_cores", _read_cores),
+        # thermal 在前：它顺手把共享内存里的有效频率写进 state.shared，
+        # 紧接着的 cpu_freq 就能用上，而不是晚 1 个采样周期。
         ("thermal", _read_thermal),
+        ("cpu_freq", _read_cpu_freq),
     )
     for metric, probe in probes:
         try:

@@ -228,7 +228,20 @@ GUI 之外有四条路子：
 - **CPU / 内存 / 磁盘 / 网络**：ctypes 直调 Win32（`GetSystemTimes`、`GlobalMemoryStatusEx`、`GetDiskFreeSpaceExW`、`GetIfTable2`），有 psutil 时优先用 psutil，两者都不需要额外安装。
 - **GPU**：直接调 NVIDIA `nvml.dll`（占用、温度、显存、功耗、风扇、频率）。没有 N 卡或没装驱动时这些指标显示「—」，不影响其它功能。
 - **CPU 温度 / CPU 功耗 / 风扇转速**：读 LibreHardwareMonitor / OpenHardwareMonitor / HWiNFO 的共享内存。**这几项需要你自己装一个这类监控软件并在后台运行**，否则显示「—」（本项目不伪造 ACPI 读数）。
+- **CPU 频率**：优先用 HWiNFO 的 `Average Effective Clock`（真实随负载变化的有效频率）；没有 HWiNFO 时用 `psutil.cpu_freq()`，注意 Windows 上它返回的是**基准频率**（本机恒 3700 MHz，不随负载变化），界面会标注「（基准频率）」。
 - 采样在后台线程按 0.5 s 节流，单帧只取缓存值，实测稳态 3–4 ms，不拖累 30 fps 推流。
+
+### 用 HWiNFO 拿到真实核心温度 / 功耗 / 风扇（v1.8）
+
+HWiNFO 免费版就能用，只要三步：
+
+1. 打开 HWiNFO64 → **设置** → 勾选「共享内存支持」（对应 INI 里 `[Settings]` 的 `SensorsSM=1`）。
+2. 启动时选 **只显示传感器**（`Sensors-only`），保持传感器窗口开着——共享内存只在传感器窗口运行时才存在。
+3. 打开 HydroHUD，左栏指标卡下方会显示「CPU 温度 / 功耗 / 风扇来自 HWiNFO 共享内存」。
+
+读到之后 `cpu_temp` 是 CPU 封装温度（`CPU Package`，没有就取最热的核心），`cpu_power` 是封装功耗，`fan` 是主板上的 CPU 风扇转速，`cpu_freq` 换成有效频率。免费版共享内存有 **12 小时连续运行**限制，到点 HWiNFO 会关掉共享内存，重新勾选即可；Pro 版无此限制。
+
+> 为什么不用命令行自动化？HWiNFO 的 `-s` 等参数是 Pro 专属，免费版弹「Command-line parameters are supported in HWiNFO64 Pro only.」，所以本项目只读共享内存，不代你启动 HWiNFO。
 
 ### 新图层怎么用
 
@@ -350,7 +363,7 @@ HydroHUD/
 ├── packaging/linux/  udev 规则、安装脚本、桌面入口
 ├── ROADMAP.md        后续版本规划与待验证实验
 ├── AGENTS.md         给编码 agent 的移植与扩展说明书
-├── tests/            pytest 用例（1194 项，全部纯软件，无需硬件）
+├── tests/            pytest 用例（1201 项，全部纯软件，无需硬件）
 ├── preview/          预设 / 背景 / v1.3 新能力渲染预览图（contact-sheet.png 是总览）
 ├── examples/         示例工程 .hud.json + 示例插件 + Home Assistant 集成包
 ├── assets/           图标、界面截图
@@ -369,7 +382,9 @@ HydroHUD/
 - **Windows 为完整支持平台**：推流、设备控制、托盘、热键只在 Windows 上验证过。Linux 的 hidraw 后端已经接通（`Screen` / `Control` 按平台分派），udev 规则、桌面入口与安装脚本见 [docs/LINUX.md](docs/LINUX.md)，但 **Linux 真机推流尚未回归**；macOS 未开始。
 - 仅 LG600（PID 1520）经过真机验证。LG700（1A2C:151C）已登记设备表，协议推定与 LG600 相同但未实测（见 [docs/PROTOCOL.md](docs/PROTOCOL.md)）。
 - 单帧 46920 字节上限：质量 100 的照片（约 42–46 KB，正好吃满预算）能原样上屏；只有逐像素噪点这种病态素材才会被迫降质量。
-- CPU 温度：优先读 LHM / HWiNFO 共享内存（核心温度），都没有时回落到 ACPI 热区（主板传感器，量级参考，界面里会注明来源）。CPU 功耗与风扇转速只能来自共享内存，没装就显示「—」。
+- CPU 温度：优先读 HWiNFO / LHM / OHM 共享内存（核心温度），都没有时回落到 ACPI 热区（主板传感器，量级参考，界面里会注明来源）。CPU 功耗与风扇转速只能来自共享内存，没装就显示「—」。
+- CPU 频率：有 HWiNFO 时用它的 `Average Effective Clock`（真实有效频率）；否则用 `psutil.cpu_freq()`，而 Windows 上这个值只是**基准频率**、不随负载变化（界面标注「（基准频率）」）。
+- HWiNFO 免费版的共享内存有 12 小时连续运行限制，到点会被 HWiNFO 关掉；之后 `cpu_temp` 会回落到 ACPI，重新勾选「共享内存支持」即可恢复。
 - 折线图历史只存在于内存（默认 120 个采样点，0.5 s 一个 ≈ 1 分钟），重启后重新累积。
 - 视频需要 ffmpeg：`pip install imageio imageio-ffmpeg`，打包版已内置。
 - 「正在播放」需要 `pip install winsdk`（可选依赖，不在 requirements.txt 里）；未安装时该图层显示占位文案，其余功能不受影响。

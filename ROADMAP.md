@@ -1,19 +1,19 @@
 # HydroHUD 路线图
 
-v1.2.0 补上了「系统状态」这条主线（23 项指标、折线图/仪表盘），v1.3.0 补上了另一条更根本的主线：**「自己做画面」真的做得出来了**——可视化画布编辑器、撤销重做、7 类新图层、主题包、插件、本地 API。v1.4.0 继续往「平台化」推：插件参数声明与编辑器自动表单、插件隔离与权限声明、WebSocket 事件流与 Home Assistant 集成、社区预设库、Linux 打包资源、`ruff` 门禁。v1.5.0 转向「一眼看懂」：性能仪表盘图层（CPU / GPU 温度与占用率常驻、功耗频率可开关）、全套 Aurora 界面换肤、ACPI 温度兜底。v1.6.0 打通了协议层最后一公里：**屏内 flash 待机图写入**（`0x0A` / `0x0B` 真机验证，可在界面里换掉关机时显示的那张图、并一键写回官方素材）。v1.7.0 做完了平台化里不依赖硬件的那一半：**多屏面板选择、中英双语界面、插件权限审计、结构化事件日志、预设库缩略图与排序**。这份文档规划之后往哪儿长：哪些是顺手就能做的小改进，哪些要依赖协议层再做实验，哪些属于长期生态建设。
+v1.2.0 补上了「系统状态」这条主线（23 项指标、折线图/仪表盘），v1.3.0 补上了另一条更根本的主线：**「自己做画面」真的做得出来了**——可视化画布编辑器、撤销重做、7 类新图层、主题包、插件、本地 API。v1.4.0 继续往「平台化」推：插件参数声明与编辑器自动表单、插件隔离与权限声明、WebSocket 事件流与 Home Assistant 集成、社区预设库、Linux 打包资源、`ruff` 门禁。v1.5.0 转向「一眼看懂」：性能仪表盘图层（CPU / GPU 温度与占用率常驻、功耗频率可开关）、全套 Aurora 界面换肤、ACPI 温度兜底。v1.6.0 打通了协议层最后一公里：**屏内 flash 待机图写入**（`0x0A` / `0x0B` 真机验证，可在界面里换掉关机时显示的那张图、并一键写回官方素材）。v1.7.0 做完了平台化里不依赖硬件的那一半：**多屏面板选择、中英双语界面、插件权限审计、结构化事件日志、预设库缩略图与排序**。v1.8.0 修好了传感器侧最后一个「装了也没用」的坑：**HWiNFO SM2 共享内存**（以前偏移错位导致永远读不到，现在能拿到真实 CPU 封装温度 / 功耗 / 风扇 / 有效频率）。这份文档规划之后往哪儿长：哪些是顺手就能做的小改进，哪些要依赖协议层再做实验，哪些属于长期生态建设。
 
 工作量单位是**人日**（含测试与真机验证，AI 辅助开发的保守估计）。
 
 ---
 
-## 0. 基线：v1.7.0 有什么
+## 0. 基线：v1.8.0 有什么
 
 | 能力 | 现状 |
 | --- | --- |
 | 传输 | 裸 Win32 HID（ctypes），图像 1025 字节报文 / 控制 441 字节报文，零第三方 HID 库；`transport.py` 抽象 + `FakeTransport`，Linux 走 `/dev/hidrawN`（`Screen` / `Control` 按平台分派，未真机验证） |
 | 帧格式 | 每帧 1020 字节分包，预算 **46 包 = 46920 字节**（v1.0.0 沿用官方软件的 15 包习惯；E1 实测后放开），JPEG 自适应质量（100→5） |
 | 渲染 | **15 类图层**：文字（含指标模板）、时钟、状态文字、进度条、折线图、环形仪表盘、贴图、温度计、倒计时、滚动文字、图片序列、二维码、天气、正在播放、**性能仪表盘**；所有图层支持 `visible` 单独隐藏；背景纯色 / 图片 / GIF / 视频 / **屏幕捕获**；插件图层兜底 |
-| 系统状态（v1.2 / v1.5） | 23 项指标：CPU/内存/GPU/磁盘/网络/温度/功耗/风扇/频率/运行时间；GPU 走 NVML，CPU 温度走 LHM/HWiNFO 共享内存、缺失时回落 ACPI 热区；`SensorHub` 后台 0.5 s 采样 + 120 点历史，稳态 3–4 ms |
+| 系统状态（v1.2 / v1.5 / v1.8） | 23 项指标：CPU/内存/GPU/磁盘/网络/温度/功耗/风扇/频率/运行时间；GPU 走 NVML；CPU 温度/功耗/风扇读 **HWiNFO SM2 共享内存**（v1.8，真机验证）或 LHM/OHM 共享内存，都没有时回落 ACPI 热区；CPU 频率有 HWiNFO 时用 `Average Effective Clock`（真实有效频率），否则 `psutil`（仅基准频率）；`SensorHub` 后台 0.5 s 采样 + 120 点历史，稳态 3–4 ms |
 | 编辑（v1.3） | 画布直接拖动 / 8 手柄缩放 / 网格与中心线吸附 / Ctrl 多选 / 方向键微移；撤销重做（拖动合并为一步）；15 类图层的参数面板，性能仪表盘可在面板里逐个勾选要显示的附加指标 |
 | 预览 | 480×480，约 16 fps；顶部显示渲染耗时与帧体积，下方常驻三格（渲染耗时 / 实际帧率 / 累计帧数） |
 | 界面（v1.5 / v1.7） | 中英双语界面（v1.7，`i18n.py` + 「帮助 → 界面语言」即时切换、选择持久化）；Aurora 换肤：左侧图标栏、顶栏 AURORA 徽章 + 版本 / 帧数 / 设备 chip、卡片青紫渐变顶线、左栏「实时指标」卡（CPU / GPU 进度条 + sparkline + 双温度 + 附加指标开关） |
@@ -22,7 +22,7 @@ v1.2.0 补上了「系统状态」这条主线（23 项指标、折线图/仪表
 | 工程 | `.hud.json` 工程文件；**12 个中文预设**（含 Aurora 仪表盘）；`.hudpack` 主题包（工程 + 素材 zip）；官方素材扫描导入 |
 | 自动化（v1.3） | 本地 HTTP API（`127.0.0.1:4780`，token + SSE `/events` + **WebSocket `/ws`**，附 `examples/homeassistant/`）+ `hudctl` CLI；图层插件（`%APPDATA%\HydroHUD\plugins`，**参数声明 + 自动表单 + 故障隔离**）；**社区预设库**（`presetslib.py`：远程 JSON 索引 + 离线缓存 + 一键安装） |
 | 常驻能力（v1.1 / v1.7） | 系统托盘、全局热键、工程轮播、拖放导入、界面状态记忆、开机自启开关、崩溃日志、休眠唤醒自动重连；**结构化事件日志（v1.7）**：`%LOCALAPPDATA%\HydroHUD\logs\events.jsonl`，512 KiB 轮转 3 份，一行一个 JSON |
-| 分发 | PyInstaller 单文件 exe（约 73 MB）；**1194 项 pytest**；`tools/check_device.py` 硬件自检、`tools/verify_v11.py` / `verify_v13.py` 真机帧率回归、`tools/gui_check.py` 无人值守 GUI 自检（51 项） |
+| 分发 | PyInstaller 单文件 exe（约 73 MB）；**1201 项 pytest**；`tools/check_device.py` 硬件自检、`tools/verify_v11.py` / `verify_v13.py` 真机帧率回归、`tools/gui_check.py` 无人值守 GUI 自检（51 项） |
 | 协议文档 | 仓库内 `docs/PROTOCOL.md`、`docs/LAYERS.md`、`docs/AUTOMATION.md`、`docs/PLUGINS.md`、`docs/LINUX.md` |
 
 已知没做的：开机动画 `startup.pak` 容器、`0x18`/`0x1A`/`0x1E` 三个设置命令、LG700 型号、Linux 真机验证、代码签名、插件真沙箱（静态审计已做，但不做隔离）、编辑器内部文案与长段落的英文翻译。多屏与主要界面文案已由 v1.7 完成。
@@ -81,7 +81,7 @@ v1.2.0 补上了「系统状态」这条主线（23 项指标、折线图/仪表
 
 | 功能 | 落地做法 | 状态 |
 | --- | --- | --- |
-| 硬件传感器接入 | `hydrohud/sensors.py`：23 项指标。GPU 直调 `nvml.dll`（占用/温度/显存/功耗/风扇/频率），CPU/内存/磁盘/网络走 ctypes（`GetSystemTimes`/`GlobalMemoryStatusEx`/`GetDiskFreeSpaceExW`/`GetIfTable2`，有 psutil 则优先），CPU 温度/功耗/风扇从 LHM/HWiNFO 共享内存读、缺失显示「—」；`SensorHub` 0.5 s 节流采样 + 120 点环形历史 | ✅ |
+| 硬件传感器接入 | `hydrohud/sensors.py`：23 项指标。GPU 直调 `nvml.dll`（占用/温度/显存/功耗/风扇/频率），CPU/内存/磁盘/网络走 ctypes（`GetSystemTimes`/`GlobalMemoryStatusEx`/`GetDiskFreeSpaceExW`/`GetIfTable2`，有 psutil 则优先），CPU 温度/功耗/风扇从 HWiNFO SM2（v1.8 按实测布局重写）或 LHM/OHM 共享内存读、缺失显示「—」；`SensorHub` 0.5 s 节流采样 + 120 点环形历史 | ✅ |
 | 折线图图层 | `chart`：指标历史曲线，圆角背景 + 网格 + 渐变面积 + 平滑折线 + 左上角标题；可配指标/宽高/颜色/填充/背景/网格/点数 | ✅ |
 | 环形仪表盘图层 | `gauge`：270° 弧 + 2× 超采样抗锯齿 + 圆心大数字 + 上方标签；自动按指标量程归一化 | ✅ |
 | 状态文字支持任意指标 | `sysinfo`/`bars` 从固定 cpu/ram 改为任意 23 项指标（最多 8 项/图层），编辑界面用勾选对话框选 | ✅ |
@@ -175,6 +175,21 @@ v1.4.0 先落地了「平台化」里不依赖硬件的那一半：插件参数�
 | 预设库缩略图 | `presetslib` 索引新增 `thumbnail` / `rating` / `downloads`：缩略图按 URL sha256 缓存（1 MiB 上限、原子写、超限不落盘）、列表行显示「4.6 分 · 1.2 万下载」、支持按评分 / 下载量 / 名称排序 | ✅ |
 | 无人值守自检 | `tools/gui_check.py` 46 → **51 项**：新增多屏面板选择、插件权限审计、界面语言切换、事件日志读写、预设库缩略图排序 | ✅ |
 
+### v1.8「HWiNFO 共享内存」— 真实核心温度 / 功耗 / 风扇（✅ 已完成，v1.8.0）
+
+目标：让 HydroHUD 像游戏加加那样，从 HWiNFO 拿到 CPU 核心温度、封装功耗、风扇转速与真实有效频率，而不是只显示「—」。
+真机结论：HWiNFO 的 SM2 共享内存布局以前**整段解析错位**（把 `int64 poll_time` 当成 4 字节），所以一直是「装了 HWiNFO 也读不到」；按实测偏移重写后 4 项一次读通。
+
+| 项目 | 内容 | 状态 |
+| --- | --- | --- |
+| SM2 布局实测 | `Global\HWiNFO_SENS_SM2`（8 MiB，magic `HWiS`）：头部 44 字节（`poll_time` 是 **int64**）、sensor 元素 392 字节（label 从 +8 起 128 字节）、reading 元素 460 字节（label +12、unit +268、**double 数值 +284**）；判别类型靠 reading 的 `+0` 处 `readingType`（1 温度 / 3 风扇 RPM / 5 功耗 / 6 频率 MHz），**不能靠单位串**（中文系统摄氏度是 GBK `b"\xa1\xe6"`） | ✅ 真机实测 |
+| 解析器重写 | `sensors._HwinfoLayout` / `_hwinfo_layout()` / `_hwinfo_reading()` / `_parse_hwinfo_buffer()`：校验 magic、元素尺寸与偏移、上限；温度优先 `CPU Package` 再最热核心并排除 `Distance to TjMAX`；功耗排除 `PL1/PL2 Power Limit`；风扇只认 CPU 标签、排除 GPU 传感器 | ✅ |
+| 只读需要的段 | `_read_shared_mapping(..., prefix=64, total_of=...)`：先读 64 字节头部算出 `bytes_needed()` 再拷那一段（本机约 325 KB），不再每次拷 8 MiB | ✅ |
+| 真实 CPU 频率 | `psutil.cpu_freq()` 在 Windows 只返回**基准频率**（本机恒 3700 MHz，压满 24 核也不变）；HWiNFO 的 `Average Effective Clock` 才是真实有效频率（实测 idle 512–735 / 满载 3339–3742 MHz）。`_read_cpu_freq()` 改为共享内存优先，`_collect` 把 thermal 探针提到 cpu_freq 之前以免晚一个采样周期 | ✅ 真机验证 |
+| 界面提示 | 指标卡下方按数据源显示「CPU 温度 / 功耗 / 风扇来自 HWiNFO 共享内存」/「取自 ACPI 主板传感器」/「读不到：装 HWiNFO64，开「共享内存支持」并保持传感器窗口」 | ✅ |
+| psutil 补进依赖 | `requirements.txt` 加 `psutil>=5.9`：之前打包版 exe 没带 psutil，用户的磁盘读写速率恒为「—」（`disk_io_counters` 无替代） | ✅ |
+| 文档 | README 中英双版补「用 HWiNFO 拿真实核心温度 / 功耗 / 风扇」小节（三步配置 + 免费版 12 小时限制 + 为什么不做命令行自动化）；`docs/LAYERS.md` 补 `cpu_freq` 取值顺序与 SM2 布局 | ✅ |
+
 ### v2.0「平台化」— 社区与生态（约 20 人日）
 
 | 项目 | 内容 | 工作量 / 状态 |
@@ -211,7 +226,7 @@ v1.4.0 先落地了「平台化」里不依赖硬件的那一半：插件参数�
 
 | 项 | 现状 | 计划 |
 | --- | --- | --- |
-| 测试 | **1194 项**（渲染 15 类图层 / 图表仪表 / 场景 / 传感器 / 分帧 / 编码 / 撤销重做 / 画布几何 / 插件参数与隔离 / 预设库 / API + WS / hudctl / 主题包 / 天气 / 捕捉 / 传输 / Linux 打包与 hidraw 后端 / 文档站装配与链接改写）；设备层用 `FakeTransport`、替身传输类与桩 `write_report` 覆盖报文序列 | ✅ CI 已强制（ubuntu + windows × Py 3.10/3.12/3.13 + black + ruff + 打包 + 文档站 `mkdocs build --strict`）；真机路径只能靠 `tools/check_device.py` / `verify_v11.py` / `verify_v13.py` / `gui_check.py`（51 项无人值守 GUI 自检） |
+| 测试 | **1201 项**（渲染 15 类图层 / 图表仪表 / 场景 / 传感器 / 分帧 / 编码 / 撤销重做 / 画布几何 / 插件参数与隔离 / 预设库 / API + WS / hudctl / 主题包 / 天气 / 捕捉 / 传输 / Linux 打包与 hidraw 后端 / 文档站装配与链接改写）；设备层用 `FakeTransport`、替身传输类与桩 `write_report` 覆盖报文序列 | ✅ CI 已强制（ubuntu + windows × Py 3.10/3.12/3.13 + black + ruff + 打包 + 文档站 `mkdocs build --strict`）；真机路径只能靠 `tools/check_device.py` / `verify_v11.py` / `verify_v13.py` / `gui_check.py`（51 项无人值守 GUI 自检） |
 | exe 体积 | 72 MB（含 ffmpeg + numpy） | 提供 Lite 版（无视频，约 40 MB）；或把视频解码拆成可选插件 |
 | 首启动速度 | 单文件解包 1–2 s | 提供 one-folder 版本；或按需导入 imageio |
 | 类型与风格 | `black` 100 列 + `ruff`（`pyproject.toml` 共享配置，E4/E7/E9/F/W/I/UP/B 规则）全绿 | ✅ CI 已强制（`lint (black + ruff)` job） |
@@ -262,4 +277,4 @@ v1.4.0 先落地了「平台化」里不依赖硬件的那一半：插件参数�
 | 渲染 + 编码单帧耗时 | ≤ 8 ms（v1.2 实测：11 个预设 0.02–3.4 ms 渲染，含编码约 8–12 ms） |
 | 新用户成功上屏所需步骤 | ≤ 3 步（检测 → 选预设 → 开始） |
 | 未知错误导致的白屏/崩溃 | 0（全部转中文提示） |
-| 测试覆盖 | 每条协议路径至少一个用例；1194 项全绿，`FakeTransport` 覆盖报文序列；文档站 `mkdocs build --strict` 不允许断链 |
+| 测试覆盖 | 每条协议路径至少一个用例；1201 项全绿，`FakeTransport` 覆盖报文序列；文档站 `mkdocs build --strict` 不允许断链 |
