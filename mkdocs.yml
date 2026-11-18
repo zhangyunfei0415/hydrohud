@@ -48,6 +48,7 @@ theme:
 
 nav:
   - 首页: index.md
+  - English: index.en.md
   - 图层参考: layers.md
   - 自动化: automation.md
   - 插件开发: plugins.md

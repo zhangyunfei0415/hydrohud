@@ -195,6 +195,11 @@ class HidrawInfo:
     product_id: int
     interface_number: int | None
     report_len: int | None
+    #: USB serial number of the device the node belongs to, or ``""`` when the
+    #: kernel or the device does not expose one. Both interfaces of one physical
+    #: panel report the same serial, which is how panels of the same model are
+    #: told apart; a missing serial falls back to the USB port path.
+    serial: str = ""
 
 
 _HID_ID_PREFIX = "HID_ID="
@@ -239,6 +244,7 @@ def list_hidraw(sysfs_root: str | Path | None = None) -> list[HidrawInfo]:
                 product_id=ids[1],
                 interface_number=interface,
                 report_len=report_len_for(path),
+                serial=_read_usb_serial(node),
             )
         )
     return found
@@ -322,3 +328,32 @@ def _read_interface_number(node: Path) -> int | None:
         return int(text, 16)
     except ValueError:
         return None
+
+
+def _read_usb_serial(node: Path) -> str:
+    """Identify the physical USB device a hidraw node belongs to.
+
+    ``/sys/class/hidraw/hidrawN/device`` resolves into the HID device directory
+    (``.../1-3:1.1/0003:1A2C:1520.0001``); the USB *device* is two levels up
+    (``.../1-3``). Both interfaces of one panel resolve to that same directory,
+    while two panels differ there -- in ``serial`` when the device reports one,
+    otherwise in the USB port path (``devpath``). The bus address is the only
+    remaining difference, and it changes on replug, so it is deliberately not
+    used. Returns ``""`` when nothing identifies the node.
+    """
+    try:
+        resolved = (node / "device").resolve()
+    except OSError:
+        return ""
+    usb_device = resolved.parent.parent
+    try:
+        serial = (usb_device / "serial").read_text(encoding="utf-8").strip()
+    except OSError:
+        serial = ""
+    if serial:
+        return serial
+    try:
+        bus_port = (usb_device / "devpath").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    return f"port:{bus_port}" if bus_port else ""

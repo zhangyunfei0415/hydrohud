@@ -167,6 +167,15 @@ class SP_DEVICE_INTERFACE_DATA(ctypes.Structure):
     ]
 
 
+class SP_DEVINFO_DATA(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", ctypes.c_uint32),
+        ("ClassGuid", GUID),
+        ("DevInst", ctypes.c_uint32),
+        ("Reserved", ctypes.c_void_p),
+    ]
+
+
 class HIDD_ATTRIBUTES(ctypes.Structure):
     _fields_ = [
         ("Size", ctypes.c_uint32),
@@ -222,6 +231,26 @@ setupapi.SetupDiGetDeviceInterfaceDetailW.argtypes = [
     ctypes.c_void_p,
 ]
 setupapi.SetupDiDestroyDeviceInfoList.argtypes = [ctypes.c_void_p]
+
+# cfgmgr32 locates the USB composite device a HID interface belongs to. Two
+# identical panels expose byte-identical HID paths except for their bus
+# addresses, which change on every replug, so the parent device instance id is
+# the only stable way to tell them apart (HID string descriptors are empty on
+# this hardware).
+cfgmgr32 = _load_dll("cfgmgr32")
+cfgmgr32.CM_Get_Parent.argtypes = [
+    ctypes.POINTER(ctypes.c_uint32),
+    ctypes.c_uint32,
+    ctypes.c_uint32,
+]
+cfgmgr32.CM_Get_Parent.restype = ctypes.c_uint32
+cfgmgr32.CM_Get_Device_IDW.argtypes = [
+    ctypes.c_uint32,
+    ctypes.c_wchar_p,
+    ctypes.c_uint32,
+    ctypes.c_uint32,
+]
+cfgmgr32.CM_Get_Device_IDW.restype = ctypes.c_uint32
 
 hid.HidD_GetHidGuid.argtypes = [ctypes.POINTER(GUID)]
 hid.HidD_GetAttributes.argtypes = [ctypes.c_void_p, ctypes.POINTER(HIDD_ATTRIBUTES)]
@@ -292,6 +321,12 @@ class HidInfo:
     input_len: int
     output_len: int
     feature_len: int
+    #: Stable id of the physical panel this collection belongs to (the USB
+    #: composite device instance id on Windows), or ``""`` when unknown. Two
+    #: panels of the same model differ here even though every other field but
+    #: `path` is identical; `path` itself changes on replug, so it cannot key a
+    #: saved device selection.
+    panel_id: str = ""
 
     @property
     def role(self) -> str:
@@ -301,6 +336,26 @@ class HidInfo:
         if self.output_len == CONTROL_REPORT_LEN:
             return "control"
         return "unknown"
+
+
+def _parent_device_id(devinst: int, levels: int = 2) -> str:
+    """Device instance id of the USB device `levels` nodes above a HID interface.
+
+    A HID interface node (``USB\\VID_x&PID_y&MI_00\\...``) sits under the USB
+    composite device (``USB\\VID_x&PID_y\\<serial>\\``), which is the node shared
+    by all collections of one physical panel. Returns ``""`` when cfgmgr32 is
+    unavailable or the walk fails, so callers can fall back to the device path.
+    """
+    current = int(devinst)
+    for _ in range(max(1, levels)):
+        parent = ctypes.c_uint32(0)
+        if cfgmgr32.CM_Get_Parent(ctypes.byref(parent), current, 0) != 0:
+            return ""
+        current = parent.value
+    buffer = ctypes.create_unicode_buffer(512)
+    if cfgmgr32.CM_Get_Device_IDW(current, buffer, len(buffer), 0) != 0:
+        return ""
+    return buffer.value
 
 
 def _hid_guid() -> GUID:
@@ -342,11 +397,19 @@ def enumerate_hid(vid: int | None = None, pid: int | None = None) -> list[HidInf
             ctypes.cast(detail, ctypes.POINTER(ctypes.c_uint32))[0] = (
                 8 if ctypes.sizeof(ctypes.c_void_p) == 8 else 6
             )
+            devnode = SP_DEVINFO_DATA()
+            devnode.cbSize = ctypes.sizeof(devnode)
             if not setupapi.SetupDiGetDeviceInterfaceDetailW(
-                devinfo, ctypes.byref(did), detail, needed.value, ctypes.byref(needed), None
+                devinfo,
+                ctypes.byref(did),
+                detail,
+                needed.value,
+                ctypes.byref(needed),
+                ctypes.byref(devnode),
             ):
                 continue
             path = detail.raw[4:].decode("utf-16-le", "replace").split("\x00")[0]
+            panel_id = _parent_device_id(devnode.DevInst)
 
             handle = kernel32.CreateFileW(
                 path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, 0, None
@@ -388,6 +451,7 @@ def enumerate_hid(vid: int | None = None, pid: int | None = None) -> list[HidInf
                         input_len=caps.InputReportByteLength,
                         output_len=caps.OutputReportByteLength,
                         feature_len=caps.FeatureReportByteLength,
+                        panel_id=panel_id,
                     )
                 )
             finally:
@@ -437,9 +501,22 @@ def _linux_collections(vid: int, pid: int) -> list[HidInfo]:
                 input_len=report_len,
                 output_len=report_len,
                 feature_len=0,
+                panel_id=_linux_panel_id(node),
             )
         )
     return found
+
+
+def _linux_panel_id(node: Any) -> str:
+    """Stable id for the USB device a hidraw node belongs to.
+
+    Both interfaces of one panel report the same serial (or, without one, the
+    same USB port path), which is what distinguishes two panels of one model.
+    """
+    serial = getattr(node, "serial", "") or ""
+    if serial:
+        return f"usb:{serial}"
+    return ""
 
 
 def enumerate_devices(vid: int = VENDOR_ID, pid: int = PRODUCT_ID) -> list[dict]:
@@ -461,9 +538,123 @@ def enumerate_devices(vid: int = VENDOR_ID, pid: int = PRODUCT_ID) -> list[dict]
             "input_len": info.input_len,
             "output_len": info.output_len,
             "feature_len": info.feature_len,
+            "panel_id": info.panel_id,
         }
         for info in collections
     ]
+
+
+@dataclass(frozen=True)
+class PanelInfo:
+    """One physical panel: its image and control collections, plus an id.
+
+    `panel_id` is stable across replugs and identical for every collection of
+    the same panel, so it is what a saved device selection keys on. `label` is
+    for the UI and only becomes unique when several panels are attached.
+    """
+
+    panel_id: str
+    label: str
+    image: HidInfo | None
+    control: HidInfo | None
+    vendor_id: int
+    product_id: int
+    spec: Any = None
+
+    @property
+    def ready(self) -> bool:
+        """Whether both collections needed to stream and control are present."""
+        return self.image is not None and self.control is not None
+
+
+def _panel_group(collection: HidInfo) -> str:
+    """Group key for one collection: its parent panel, or the ids as a fallback.
+
+    Windows and Linux both report `panel_id`; when the platform walk fails the
+    vendor/product pair is used so the two collections still pair up, matching
+    the single-panel behaviour this code had before multi-panel support.
+    """
+    if collection.panel_id:
+        return collection.panel_id
+    return f"usb:{collection.vendor_id:04X}:{collection.product_id:04X}"
+
+
+def _panel_short_id(panel_id: str) -> str:
+    """Last path segment of a device instance id, for a human-readable suffix."""
+    tail = panel_id.rsplit("\\", 1)[-1] or panel_id
+    return tail[-6:] if len(tail) > 6 else tail
+
+
+def _panel_label(groups: dict[str, list[HidInfo]], panel_id: str) -> str:
+    """Name a panel, disambiguating identical models by the id tail."""
+    members = groups[panel_id]
+    vendor_id = members[0].vendor_id
+    product_id = members[0].product_id
+    spec = devices_mod.find_spec(vendor_id, product_id) if devices_mod is not None else None
+    base = spec.label if spec is not None else f"TCOMAS 面板 {vendor_id:04X}:{product_id:04X}"
+    if len(groups) < 2:
+        return base
+    return f"{base} · {_panel_short_id(panel_id)}"
+
+
+def enumerate_panels(vid: int = VENDOR_ID, pid: int = PRODUCT_ID) -> list[PanelInfo]:
+    """Group the attached HID collections into one `PanelInfo` per physical panel.
+
+    Two panels of the same model are indistinguishable by vendor/product id or by
+    HID string descriptors (this hardware returns empty ones), so the grouping
+    uses the parent USB device instance id. The list is ordered by panel id, which
+    keeps the first panel - and therefore the default device - stable across runs.
+    """
+    try:
+        collections = enumerate_collections(vid, pid)
+    except OSError:
+        return []
+
+    groups: dict[str, list[HidInfo]] = {}
+    for collection in collections:
+        groups.setdefault(_panel_group(collection), []).append(collection)
+
+    panels: list[PanelInfo] = []
+    for panel_id in sorted(groups):
+        members = groups[panel_id]
+        image = next((m for m in members if m.role == "image"), None)
+        control = next((m for m in members if m.role == "control"), None)
+        first = members[0]
+        spec = (
+            devices_mod.find_spec(first.vendor_id, first.product_id)
+            if devices_mod is not None
+            else None
+        )
+        panels.append(
+            PanelInfo(
+                panel_id=panel_id,
+                label=_panel_label(groups, panel_id),
+                image=image,
+                control=control,
+                vendor_id=first.vendor_id,
+                product_id=first.product_id,
+                spec=spec,
+            )
+        )
+    return panels
+
+
+def find_panel(
+    panel_id: str | None = None, *, vid: int = VENDOR_ID, pid: int = PRODUCT_ID
+) -> PanelInfo:
+    """Return the named panel, or the first one when `panel_id` is empty/unknown.
+
+    Raises `RuntimeError` when no panel is attached, so callers can show the same
+    "is the cooler plugged in?" message they use for the single-panel path.
+    """
+    panels = enumerate_panels(vid, pid)
+    if not panels:
+        raise RuntimeError(f"no HID device {vid:04X}:{pid:04X} found - is the cooler plugged in?")
+    if panel_id:
+        for panel in panels:
+            if panel.panel_id == panel_id:
+                return panel
+    return panels[0]
 
 
 def detected_spec() -> DeviceSpec | None:
@@ -916,11 +1107,29 @@ class _HidDevice:
 
 
 class Screen(_HidDevice):
-    """An opened LG600 panel, ready to receive frames."""
+    """An opened LG600 panel, ready to receive frames.
+
+    Pass a `PanelInfo` to drive a specific panel when several are attached, or a
+    `HidInfo` to open one already-resolved collection. With neither, the first
+    attached device is used, which is what every single-panel call site relies on.
+    """
 
     report_len = REPORT_LEN
 
+    def __init__(self, target: PanelInfo | HidInfo | None = None) -> None:
+        if isinstance(target, HidInfo):
+            super().__init__(target)
+            self.panel: PanelInfo | None = None
+        else:
+            super().__init__()
+            self.panel = target
+
     def _default_info(self) -> HidInfo:
+        if self.panel is not None:
+            self.panel = find_panel(self.panel.panel_id)
+            if self.panel.image is not None:
+                return self.panel.image
+            raise RuntimeError("the selected panel has no image interface")
         return find_image_interface()
 
     def send_jpeg(self, jpeg: bytes) -> None:
@@ -978,11 +1187,27 @@ class Control(_HidDevice):
     Framing matches the image interface, with one command per report and the
     parameter in the first payload byte. The panel stores values itself, so a
     command is only needed when the setting changes.
+
+    Like `Screen`, an optional `PanelInfo` selects which attached panel to drive;
+    without one the first attached device is used.
     """
 
     report_len = CONTROL_REPORT_LEN
 
+    def __init__(self, target: PanelInfo | HidInfo | None = None) -> None:
+        if isinstance(target, HidInfo):
+            super().__init__(target)
+            self.panel: PanelInfo | None = None
+        else:
+            super().__init__()
+            self.panel = target
+
     def _default_info(self) -> HidInfo:
+        if self.panel is not None:
+            self.panel = find_panel(self.panel.panel_id)
+            if self.panel.control is not None:
+                return self.panel.control
+            raise RuntimeError("the selected panel has no control interface")
         return find_control_interface()
 
     def send_command(self, cmd: int, payload: bytes = b"") -> None:

@@ -183,3 +183,71 @@ def test_enumerate_hidraw_returns_empty_without_sysfs(tmp_path: Path) -> None:
 
 def test_report_len_for_refuses_to_guess(tmp_path: Path) -> None:
     assert transport.report_len_for(str(tmp_path / "hidraw0")) is None
+
+
+# --------------------------------------------------------------------------- #
+# _read_usb_serial (the identity multi-panel grouping keys on)
+# --------------------------------------------------------------------------- #
+def _usb_device_tree(
+    tmp_path: Path,
+    *,
+    serial: str | None = None,
+    devpath: str | None = None,
+) -> tuple[Path, Path]:
+    """Build the sysfs shape below one hidraw node and return (node, usb device).
+
+    Real sysfs names the interface directory ``1-3:1.1`` and the HID device
+    ``0003:1A2C:1520.0001``, and ``hidrawN/device`` is a symlink to the latter;
+    colons are illegal in Windows path names, so the stand-in keeps the nesting
+    depth but not the exact spelling. Without symlink privileges the device entry
+    is a real directory and two levels up is the hidraw class directory, which is
+    where the USB attribute files then go.
+    """
+    node = tmp_path / "class" / "hidraw" / "hidraw0"
+    node.mkdir(parents=True)
+    usb_device = tmp_path / "usb" / "1-3"
+    hid_device = usb_device / "1-3.1" / "0003_1A2C_1520.0001"
+    hid_device.mkdir(parents=True)
+    try:
+        (node / "device").symlink_to(hid_device, target_is_directory=True)
+    except OSError:
+        (node / "device").mkdir()
+        usb_device = node.parent
+    if serial is not None:
+        (usb_device / "serial").write_text(serial, encoding="utf-8")
+    if devpath is not None:
+        (usb_device / "devpath").write_text(devpath, encoding="utf-8")
+    return node, usb_device
+
+
+def test_read_usb_serial_returns_the_device_serial(tmp_path: Path) -> None:
+    node, _ = _usb_device_tree(tmp_path, serial="SN-A1B2C3\n", devpath="1-3")
+
+    # The serial identifies the panel itself, so it beats the port path.
+    assert transport._read_usb_serial(node) == "SN-A1B2C3"
+
+
+def test_read_usb_serial_falls_back_to_the_usb_port_path(tmp_path: Path) -> None:
+    node, usb_device = _usb_device_tree(tmp_path, serial="  \n", devpath="1-3\n")
+
+    assert (usb_device / "serial").exists()
+    # An empty serial file means the device has none: the port is stable enough.
+    assert transport._read_usb_serial(node) == "port:1-3"
+
+
+def test_read_usb_serial_returns_empty_when_the_node_has_no_device(tmp_path: Path) -> None:
+    node = tmp_path / "class" / "hidraw" / "hidraw0"
+    node.mkdir(parents=True)
+
+    assert transport._read_usb_serial(node) == ""
+
+
+def test_list_hidraw_carries_the_serial_onto_each_node(tmp_path: Path) -> None:
+    node, _ = _usb_device_tree(tmp_path, serial="SN-A1B2C3", devpath="1-3")
+    uevent = _write_uevent(tmp_path, "hidraw0")
+
+    (info,) = transport.enumerate_hidraw(0x1A2C, 0x1520, sysfs_root=tmp_path)
+
+    assert uevent.exists() and node.exists()
+    assert info.serial == "SN-A1B2C3"
+    assert transport.HidrawInfo("x", 0, 0, None, None).serial == ""

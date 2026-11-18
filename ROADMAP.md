@@ -1,12 +1,12 @@
 # HydroHUD 路线图
 
-v1.2.0 补上了「系统状态」这条主线（23 项指标、折线图/仪表盘），v1.3.0 补上了另一条更根本的主线：**「自己做画面」真的做得出来了**——可视化画布编辑器、撤销重做、7 类新图层、主题包、插件、本地 API。v1.4.0 继续往「平台化」推：插件参数声明与编辑器自动表单、插件隔离与权限声明、WebSocket 事件流与 Home Assistant 集成、社区预设库、Linux 打包资源、`ruff` 门禁。v1.5.0 转向「一眼看懂」：性能仪表盘图层（CPU / GPU 温度与占用率常驻、功耗频率可开关）、全套 Aurora 界面换肤、ACPI 温度兜底。v1.6.0 打通了协议层最后一公里：**屏内 flash 待机图写入**（`0x0A` / `0x0B` 真机验证，可在界面里换掉关机时显示的那张图、并一键写回官方素材）。这份文档规划之后往哪儿长：哪些是顺手就能做的小改进，哪些要依赖协议层再做实验，哪些属于长期生态建设。
+v1.2.0 补上了「系统状态」这条主线（23 项指标、折线图/仪表盘），v1.3.0 补上了另一条更根本的主线：**「自己做画面」真的做得出来了**——可视化画布编辑器、撤销重做、7 类新图层、主题包、插件、本地 API。v1.4.0 继续往「平台化」推：插件参数声明与编辑器自动表单、插件隔离与权限声明、WebSocket 事件流与 Home Assistant 集成、社区预设库、Linux 打包资源、`ruff` 门禁。v1.5.0 转向「一眼看懂」：性能仪表盘图层（CPU / GPU 温度与占用率常驻、功耗频率可开关）、全套 Aurora 界面换肤、ACPI 温度兜底。v1.6.0 打通了协议层最后一公里：**屏内 flash 待机图写入**（`0x0A` / `0x0B` 真机验证，可在界面里换掉关机时显示的那张图、并一键写回官方素材）。v1.7.0 做完了平台化里不依赖硬件的那一半：**多屏面板选择、中英双语界面、插件权限审计、结构化事件日志、预设库缩略图与排序**。这份文档规划之后往哪儿长：哪些是顺手就能做的小改进，哪些要依赖协议层再做实验，哪些属于长期生态建设。
 
 工作量单位是**人日**（含测试与真机验证，AI 辅助开发的保守估计）。
 
 ---
 
-## 0. 基线：v1.6.0 有什么
+## 0. 基线：v1.7.0 有什么
 
 | 能力 | 现状 |
 | --- | --- |
@@ -16,16 +16,16 @@ v1.2.0 补上了「系统状态」这条主线（23 项指标、折线图/仪表
 | 系统状态（v1.2 / v1.5） | 23 项指标：CPU/内存/GPU/磁盘/网络/温度/功耗/风扇/频率/运行时间；GPU 走 NVML，CPU 温度走 LHM/HWiNFO 共享内存、缺失时回落 ACPI 热区；`SensorHub` 后台 0.5 s 采样 + 120 点历史，稳态 3–4 ms |
 | 编辑（v1.3） | 画布直接拖动 / 8 手柄缩放 / 网格与中心线吸附 / Ctrl 多选 / 方向键微移；撤销重做（拖动合并为一步）；15 类图层的参数面板，性能仪表盘可在面板里逐个勾选要显示的附加指标 |
 | 预览 | 480×480，约 16 fps；顶部显示渲染耗时与帧体积，下方常驻三格（渲染耗时 / 实际帧率 / 累计帧数） |
-| 界面（v1.5） | Aurora 换肤：左侧图标栏、顶栏 AURORA 徽章 + 版本 / 帧数 / 设备 chip、卡片青紫渐变顶线、左栏「实时指标」卡（CPU / GPU 进度条 + sparkline + 双温度 + 附加指标开关） |
+| 界面（v1.5 / v1.7） | 中英双语界面（v1.7，`i18n.py` + 「帮助 → 界面语言」即时切换、选择持久化）；Aurora 换肤：左侧图标栏、顶栏 AURORA 徽章 + 版本 / 帧数 / 设备 chip、卡片青紫渐变顶线、左栏「实时指标」卡（CPU / GPU 进度条 + sparkline + 双温度 + 附加指标开关） |
 | 推流 | 10/20/30/60 fps，绝对截止时刻调度，实测 **29.8–30.0 fps**；静态场景按 2 s 重推对抗看门狗；后台线程，窗口可最小化 |
-| 设备控制 | 亮度、开/关屏、读状态（441 字节回复）、方向设置（只存配置）、一键结束官方软件；设备表 `devices.py`（LG600 已验证 / LG700 待验证）；**写待机图（v1.6，真机已验证：`Control.upload_file(target=FLASH_TARGET_STANDBY)` + 界面入口「设备 → 写入待机图…」/「恢复官方待机图」）** |
+| 设备控制 | 亮度、开/关屏、读状态（441 字节回复）、方向设置（只存配置）、一键结束官方软件；设备表 `devices.py`（LG600 已验证 / LG700 待验证）；**写待机图（v1.6，真机已验证）**；**多屏选择（v1.7）**：`device.PanelInfo` + `enumerate_panels()` 按 USB 复合设备实例 ID 认面板，设备卡「目标屏幕」下拉 + chip「1/2 块屏」 |
 | 工程 | `.hud.json` 工程文件；**12 个中文预设**（含 Aurora 仪表盘）；`.hudpack` 主题包（工程 + 素材 zip）；官方素材扫描导入 |
 | 自动化（v1.3） | 本地 HTTP API（`127.0.0.1:4780`，token + SSE `/events` + **WebSocket `/ws`**，附 `examples/homeassistant/`）+ `hudctl` CLI；图层插件（`%APPDATA%\HydroHUD\plugins`，**参数声明 + 自动表单 + 故障隔离**）；**社区预设库**（`presetslib.py`：远程 JSON 索引 + 离线缓存 + 一键安装） |
-| 常驻能力（v1.1） | 系统托盘、全局热键、工程轮播、拖放导入、界面状态记忆、开机自启开关、崩溃日志、休眠唤醒自动重连 |
-| 分发 | PyInstaller 单文件 exe（约 73 MB）；**987 项 pytest**；`tools/check_device.py` 硬件自检、`tools/verify_v11.py` / `verify_v13.py` 真机帧率回归、`tools/gui_check.py` 无人值守 GUI 自检（46 项） |
+| 常驻能力（v1.1 / v1.7） | 系统托盘、全局热键、工程轮播、拖放导入、界面状态记忆、开机自启开关、崩溃日志、休眠唤醒自动重连；**结构化事件日志（v1.7）**：`%LOCALAPPDATA%\HydroHUD\logs\events.jsonl`，512 KiB 轮转 3 份，一行一个 JSON |
+| 分发 | PyInstaller 单文件 exe（约 73 MB）；**1194 项 pytest**；`tools/check_device.py` 硬件自检、`tools/verify_v11.py` / `verify_v13.py` 真机帧率回归、`tools/gui_check.py` 无人值守 GUI 自检（51 项） |
 | 协议文档 | 仓库内 `docs/PROTOCOL.md`、`docs/LAYERS.md`、`docs/AUTOMATION.md`、`docs/PLUGINS.md`、`docs/LINUX.md` |
 
-已知没做的：开机动画 `startup.pak` 容器、`0x18`/`0x1A`/`0x1E` 三个设置命令、LG700 型号、Linux 真机验证、多屏、代码签名、国际化。
+已知没做的：开机动画 `startup.pak` 容器、`0x18`/`0x1A`/`0x1E` 三个设置命令、LG700 型号、Linux 真机验证、代码签名、插件真沙箱（静态审计已做，但不做隔离）、编辑器内部文案与长段落的英文翻译。多屏与主要界面文案已由 v1.7 完成。
 
 ---
 
@@ -127,7 +127,7 @@ v1.4.0 先落地了「平台化」里不依赖硬件的那一半：插件参数�
 | Linux 支持 | `hydrohud/transport.py` 的 `HidrawTransport` + sysfs 枚举 + `FakeTransport`（复用 `build_packets`）；`device.Screen` / `Control` 已按平台分派到 `/dev/hidrawN`（`enumerate_collections` / `_HidDevice.backend`）；udev 规则、桌面入口、安装脚本在 `packaging/linux/`（见 `docs/LINUX.md`）；剩余：X11/Wayland 下 Tk 验证、真机推流回归 | 3 | 🟡 端到端已接线，待真机验证 |
 | LG700 适配 | `1A2C:151C` 已进设备表（`devices.py`，标 `verified=False`）；剩余：接硬件实测报文长度与命令差异 | 1 | 🟡 表就位，待硬件 |
 | 设备表 / 自动探测 | ✅ v1.3 完成：`devices.py` 表 + `device.detected_spec()` / `describe_panel()`，新屏幕加一行即可 | 1.5 | ✅ |
-| 多屏支持 | 同时驱动两块屏（不同工程），UI 做设备选择器 | 2 | ⬜ |
+| 多屏支持 | ✅ v1.7 完成：`device.PanelInfo` + `enumerate_panels()` 按 USB 复合设备实例 ID 认面板，设备卡「目标屏幕」下拉 + chip「1/2 块屏」；推流、亮度、开屏/关屏只作用于选中面板，选择持久化 | 2 | ✅ |
 | macOS（可选） | IOHIDManager 传输层；优先级最低，视社区需求 | 2.5 | ⬜ |
 
 ### v1.5「Aurora」— 一眼看懂的硬件面板（✅ 已完成，v1.5.0）
@@ -158,17 +158,34 @@ v1.4.0 先落地了「平台化」里不依赖硬件的那一半：插件参数�
 | 可恢复 | 「恢复官方待机图」直接写官方 `led1\10002.jpg` 回去，任何改动都能一键撤销 | ✅ |
 | 协议文档 | `docs/PROTOCOL.md` §3.1 补真机结论：回包无错误码、每命令一包、不要 drain、开机图 `.pak` 未解出 | ✅ |
 
+### v1.7「多屏 · 双语 · 可审计」— 平台化里不依赖硬件的那一半（✅ 已完成，v1.7.0）
+
+目标：把「接第二块屏」「换英文界面」「插件到底要什么权限」「出问题怎么查」四件事一次做掉，全部不依赖新硬件。
+
+| 项目 | 内容 | 状态 |
+| --- | --- | --- |
+| 多屏识别 | `device.PanelInfo` + `enumerate_panels()` / `find_panel()`：按 USB 复合设备实例 ID 分组（`CM_Get_Parent` 上溯两层，本机为 `USB\VID_1A2C&PID_1520\A247392SS000000`），把 image / control 两个接口配成一块物理面板 | ✅ 真机验证 |
+| 多屏选择 | 左栏设备卡「目标屏幕」下拉（两块以上才出现）+ 顶栏设备 chip 补「1/2 块屏」；推流、亮度、开屏/关屏都只作用于选中的面板；选择写进设置，重启后仍指向同一块 | ✅ |
+| 单屏零回归 | `_panel_target()` 在只有一块屏时返回 `None`，`Screen` / `Control` 走原来的「取第一台」路径 —— 单屏用户的界面与 v1.6 完全一致 | ✅ |
+| Linux 面板标识 | `transport._read_usb_serial()` 读 sysfs USB 序列号（无序列号退回 `devpath` 端口路径），同一面板的两个 hidraw 节点拿到同一 `panel_id`；刻意不用会随插拔变化的总线地址 | ✅ 单元测试 |
+| 国际化 | `hydrohud/i18n.py`：`LANGUAGES=("zh","en")` + 48 条词条 × 2 语言（key 集合完全一致）+ 可重译控件注册表 `_i18n_widgets`；「帮助 → 界面语言」即时切换菜单 / 图标栏 / 卡片标题 / 底栏按钮并写进设置 | ✅ |
+| 英文文档 | `README.en.md` 完整英文版（20 节，与中文版同结构），文档站与两版 README 互相链接 | ✅ |
+| 插件权限审计 | `hydrohud/pluginsandbox.py`：静态解析插件源码实际用到的网络 / 文件 / 子进程调用，与 `PLUGIN["permissions"]` 声明对比列「越界调用」；「帮助 → 插件权限审计…」窗口 + 图层编辑器内联标注。**明确定位为可读清单，不是安全沙箱** | ✅ |
+| 结构化事件日志 | `diagnostics.record()` / `read_events()` / `event_log_path()`：一行一个 JSON（推流起止、设备枚举、待机图写入、插件重载、语言切换），512 KiB 轮转保留 3 份；「帮助 → 打开事件日志」直达；原纯文本日志保持零改动 | ✅ |
+| 预设库缩略图 | `presetslib` 索引新增 `thumbnail` / `rating` / `downloads`：缩略图按 URL sha256 缓存（1 MiB 上限、原子写、超限不落盘）、列表行显示「4.6 分 · 1.2 万下载」、支持按评分 / 下载量 / 名称排序 | ✅ |
+| 无人值守自检 | `tools/gui_check.py` 46 → **51 项**：新增多屏面板选择、插件权限审计、界面语言切换、事件日志读写、预设库缩略图排序 | ✅ |
+
 ### v2.0「平台化」— 社区与生态（约 20 人日）
 
 | 项目 | 内容 | 工作量 / 状态 |
 | --- | --- | --- |
 | ~~图层插件 API~~ | ✅ v1.3 已完成基础版（`plugins.py`：`PluginSpec` + `draw_layer` + 自动按钮）；**v1.4 补完参数声明**：`plugins.ParamSpec` / `PARAM_TYPES` / `normalize_params` / `coerce_param` / `apply_params`，编辑器按声明自动生成控件，示例见 `examples/plugins/sparkline.py` | ✅ 完成 |
-| 插件沙箱与验收 | 已做：单次耗时软预算 `DRAW_TIME_LIMIT=0.25s`（记入 `slow`）、连续异常 `MAX_CONSECUTIVE_ERRORS=3` 次后隔离、`permissions` 声明字段；未做：真沙箱（子进程/限权）与安装前权限确认弹窗 | 2 / 🟡 隔离已做 |
+| 插件沙箱与验收 | 已做：单次耗时软预算 `DRAW_TIME_LIMIT=0.25s`（记入 `slow`）、连续异常 `MAX_CONSECUTIVE_ERRORS=3` 次后隔离、`permissions` 声明字段；**v1.7 补完安装前权限确认**：`pluginsandbox.py` 静态解析源码实际用到的网络 / 文件 / 子进程调用，与声明对比列越界项，「帮助 → 插件权限审计…」出清单；未做：真沙箱（子进程/限权），且已明确审计≠沙箱 | 2 / 🟢 审计已做，真沙箱未做 |
 | ~~本地 API~~ | ✅ v1.3 已完成（`api.py` + `hudctl.py`）；**v1.4 补完**：WebSocket `/ws`（RFC 6455 握手、每秒文本帧、`?limit=N`）与 `examples/homeassistant/` 集成包 | ✅ 完成 |
-| 社区预设库 | ✅ 已做：`hydrohud/presetslib.py`（远程 JSON 索引 + 离线缓存 + 一键安装，只下载 `.hud.json` 不执行代码）+ 「社区 → 预设库」窗口；未做：缩略图与评分字段 | 2 / 🟡 基础版完成 |
+| 社区预设库 | ✅ 已做：`hydrohud/presetslib.py`（远程 JSON 索引 + 离线缓存 + 一键安装，只下载 `.hud.json` 不执行代码）+ 「社区 → 预设库」窗口；**v1.7 补完缩略图与评分**：索引新增 `thumbnail` / `rating` / `downloads`，缩略图按 URL sha256 缓存（1 MiB 上限、原子写）、按评分 / 下载量 / 名称排序 | 2 / ✅ 完成 |
 | 自动发布流水线 | ✅ 已做：`.github/workflows/ci.yml` 跑 `pytest`（3.10/3.12/3.13 × ubuntu/windows）+ `black` + `ruff` + `build.ps1` 打包；推 `v*` tag 时 `release` job 复用打包产物并自动建 Release、附 exe、生成变更日志 | ✅ 完成 |
 | 代码签名 | 减少 SmartScreen/杀软误报（需代码签名证书，用户自行决定是否购买） | 1 |
-| 国际化 | 界面文案抽离，英文 README 与英文 UI | 3 |
+| 国际化 | ✅ v1.7 完成：`hydrohud/i18n.py` 抽离界面文案（48 条 × 中英双语），「帮助 → 界面语言」即时切换菜单 / 图标栏 / 卡片标题 / 底栏按钮并持久化；英文 README 见 `README.en.md`。未覆盖：编辑器内部与「上手提示」等长段落 | 3 / ✅ 主要文案已接 |
 | 文档站 | ✅ 已做：`tools/build_docs.py` 把 `README.md` + `docs/*.md` 装配成站点源目录并改写内链（站外链接回落 GitHub），`mkdocs.yml`（Material 主题、中文锚点、搜索），CI 的 `docs` job `mkdocs build --strict` 后由 `pages` job 发到 GitHub Pages：<https://zhangyunfei0415.github.io/hydrohud/> | ✅ 完成 |
 
 ---
@@ -194,13 +211,13 @@ v1.4.0 先落地了「平台化」里不依赖硬件的那一半：插件参数�
 
 | 项 | 现状 | 计划 |
 | --- | --- | --- |
-| 测试 | **987 项**（渲染 15 类图层 / 图表仪表 / 场景 / 传感器 / 分帧 / 编码 / 撤销重做 / 画布几何 / 插件参数与隔离 / 预设库 / API + WS / hudctl / 主题包 / 天气 / 捕捉 / 传输 / Linux 打包与 hidraw 后端 / 文档站装配与链接改写）；设备层用 `FakeTransport`、替身传输类与桩 `write_report` 覆盖报文序列 | ✅ CI 已强制（ubuntu + windows × Py 3.10/3.12/3.13 + black + ruff + 打包 + 文档站 `mkdocs build --strict`）；真机路径只能靠 `tools/check_device.py` / `verify_v11.py` / `verify_v13.py` / `gui_check.py`（45 项无人值守 GUI 自检） |
+| 测试 | **1194 项**（渲染 15 类图层 / 图表仪表 / 场景 / 传感器 / 分帧 / 编码 / 撤销重做 / 画布几何 / 插件参数与隔离 / 预设库 / API + WS / hudctl / 主题包 / 天气 / 捕捉 / 传输 / Linux 打包与 hidraw 后端 / 文档站装配与链接改写）；设备层用 `FakeTransport`、替身传输类与桩 `write_report` 覆盖报文序列 | ✅ CI 已强制（ubuntu + windows × Py 3.10/3.12/3.13 + black + ruff + 打包 + 文档站 `mkdocs build --strict`）；真机路径只能靠 `tools/check_device.py` / `verify_v11.py` / `verify_v13.py` / `gui_check.py`（51 项无人值守 GUI 自检） |
 | exe 体积 | 72 MB（含 ffmpeg + numpy） | 提供 Lite 版（无视频，约 40 MB）；或把视频解码拆成可选插件 |
 | 首启动速度 | 单文件解包 1–2 s | 提供 one-folder 版本；或按需导入 imageio |
 | 类型与风格 | `black` 100 列 + `ruff`（`pyproject.toml` 共享配置，E4/E7/E9/F/W/I/UP/B 规则）全绿 | ✅ CI 已强制（`lint (black + ruff)` job） |
 | 仓库存档 | 多个提交，`.github/` 已放入工作区 | ✅ v1.3.0 起 CI 全绿（3×3 矩阵 + lint + 打包），release 手动发布 |
 | 文档 | `README.md` + `AGENTS.md` + `docs/{PROTOCOL,LAYERS,AUTOMATION,PLUGINS,LINUX}.md` | 增加架构说明（线程模型、事件队列）；文档站 |
-| 崩溃可观测 | 只有 `_warn_once` 到控制台 | 结构化日志 + 可选匿名统计（默认关闭） |
+| 崩溃可观测 | ✅ v1.7 已做结构化事件日志（`diagnostics.record()` 写 `%LOCALAPPDATA%\HydroHUD\logs\events.jsonl`，512 KiB 轮转 3 份，一行一个 JSON，含推流起止 / 设备枚举 / flash 写入 / 插件重载 / 语言切换） | 匿名统计（默认关闭，需用户显式开启） |
 
 ---
 
@@ -227,7 +244,9 @@ v1.4.0 先落地了「平台化」里不依赖硬件的那一半：插件参数�
 6. **v1.4 Linux + LG700**——Linux 端到端已接线（`Screen`/`Control` 按平台分派到 `/dev/hidrawN`），剩下真机回归与 udev 实测；LG700 只差硬件。
 7. **~~v2.0 文档站~~ 已完成**——`tools/build_docs.py` 装配站点源目录 + `mkdocs.yml`，CI 的 `docs` / `pages` job 自动构建并发布到 <https://zhangyunfei0415.github.io/hydrohud/>。
 8. **~~v1.5 Aurora~~ 已完成**——性能仪表盘图层（温度 / 占用率常驻、功耗频率可开关）+ 全套界面换肤 + ACPI 温度兜底。
-9. **v2.0 国际化**——界面文案抽离 + 英文 UI / README，工作量最大的一块，建议在界面稳定后动。
+9. **~~v2.0 国际化~~ 已完成主体（v1.7）**——`i18n.py` 中英词条 + 界面即时切换 + `README.en.md`；剩余是编辑器内部与长段落的逐条翻译。
+10. **v1.7 多屏 / 审计 / 事件日志 / 预设缩略图**——已完成（v1.7.0），不依赖新硬件。
+11. 下一步只剩硬件与生态：Linux 与 LG700 真机回归、代码签名、插件真沙箱、开机动画 `.pak` 容器。
 
 **立即可开工的 Top 5（都是低风险、高感知）**：
 ① ~~系统托盘~~ ✅　② ~~工程轮播~~ ✅　③ ~~可视化拖动编辑~~ ✅　④ ~~传感器温度图层~~ ✅　⑤ 新版截图/GIF 演示（放 README 顶部）
@@ -243,4 +262,4 @@ v1.4.0 先落地了「平台化」里不依赖硬件的那一半：插件参数�
 | 渲染 + 编码单帧耗时 | ≤ 8 ms（v1.2 实测：11 个预设 0.02–3.4 ms 渲染，含编码约 8–12 ms） |
 | 新用户成功上屏所需步骤 | ≤ 3 步（检测 → 选预设 → 开始） |
 | 未知错误导致的白屏/崩溃 | 0（全部转中文提示） |
-| 测试覆盖 | 每条协议路径至少一个用例；987 项全绿，`FakeTransport` 覆盖报文序列；文档站 `mkdocs build --strict` 不允许断链 |
+| 测试覆盖 | 每条协议路径至少一个用例；1194 项全绿，`FakeTransport` 覆盖报文序列；文档站 `mkdocs build --strict` 不允许断链 |

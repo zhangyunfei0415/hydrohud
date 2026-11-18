@@ -16,6 +16,29 @@
 接口靠 `OutputReportByteLength` 区分（441 → 控制，1025 → 图像），不要靠 MI 编号，
 因为不同主板/固件下编号可能变。
 
+### 1.1 接两块同型号屏时怎么区分（v1.7 实测）
+
+两块 LG600 的 HID 接口路径除总线地址外完全一致（`vid_1a2c&pid_1520&mi_00` + `#8&176d7ebb&0&0000`），
+而总线地址每次插拔都会变，**不能拿来当稳定标识**。本机 `HidD_GetSerialNumberString` /
+`GetManufacturerString` / `GetProductString` / `GetPhysicalDescriptor` 全部返回空（缓冲区全 0），
+所以序列号也拿不到。
+
+可用的是 **USB 复合设备的父节点实例 ID**：从接口节点的 `DevInst` 出发，`CM_Get_Parent` 上溯两层，
+再 `CM_Get_Device_IDW` 读实例 ID。
+
+| 层 | `MI_00`（控制） | `MI_01`（图像） |
+| --- | --- | --- |
+| 0（接口本身） | `USB\VID_1A2C&PID_1520&MI_00\7&23AE730&0&0000` | `USB\VID_1A2C&PID_1520&MI_01\7&23AE730&0&0001` |
+| 1（HID 设备） | `USB\VID_1A2C&PID_1520&MI_00\8&176d7ebb&0&0000` | `USB\VID_1A2C&PID_1520&MI_01\8&176d7ebb&0&0001` |
+| **2（复合设备）** | **`USB\VID_1A2C&PID_1520\A247392SS000000`** | **同一个值** ✅ |
+
+第 2 层才是一个物理面板的标识，两个接口共享它；换第二块屏时整段会不同。实现见
+`device._parent_device_id()` / `device.enumerate_panels()`（`PanelInfo` 把 image + control 接口配成一块面板）。
+
+Linux 侧等价信息在 sysfs：`/sys/class/hidraw/hidrawN/device` 上溯两级到 USB 设备目录，读 `serial`；
+没有序列号时退回 `devpath` 里的 USB 端口路径（同样不用会随插拔变化的总线地址）。见
+`transport._read_usb_serial()`。
+
 ## 2. 报文格式
 
 图像接口每个输出报文 1025 字节，头 5 字节 + 1020 字节负载：
@@ -120,3 +143,5 @@
 - `0x0A`/`0x0B` 写 flash：**待机图（槽位 0）已通**，见 §3.1；开机图 `startup.pak` 容器格式未解出。
 - `0x18`/`0x1A`/`0x1E` 三个显示设置命令未测。
 - LG700（`1A2C:151C`）是另一套 USB 实现，未验证。
+- 多屏已解决接口配对（§1.1），但**同一块屏的两个接口是否可能被拆到不同复合设备下，未在真机上遇到过**；
+  `enumerate_panels()` 在拿不到父实例 ID 时按 `usb:VID:PID` 退化分组，此时两块同型号屏会被当成一块。

@@ -4,12 +4,15 @@
   会先移除自己旧 handler 再挂新的，所以不会重复写行；
 - :func:`log_path` 的日期在调用时求值，跨天自动换文件，不轮转、不清理；
 - 未捕获异常仍然会继续交给原始 hook（保留 stderr 输出），只是先落一份日志；
-- :func:`install_tk_handler` 只写日志，不弹任何对话框。
+- :func:`install_tk_handler` 只写日志，不弹任何对话框；
+- :func:`record` 另行维护一份结构化 JSONL 事件日志（按大小轮转），与上述
+  纯文本日志互不影响。
 """
 
 from __future__ import annotations
 
 import datetime as _datetime
+import json
 import logging
 import os
 import sys
@@ -23,6 +26,21 @@ APP_DIR_NAME = "HydroHUD"
 LOG_DIR_NAME = "logs"
 FILE_PREFIX = "app-"
 OWNED_ATTR = "_hydrohud_owned"
+
+# 结构化事件日志（JSONL）：独立于上面的按天纯文本日志。
+EVENT_LOG_FILE_NAME = "events.jsonl"
+EVENT_LOG_MAX_BYTES = 512 * 1024
+EVENT_LOG_KEEP = 3
+EVENT_LEVELS = ("debug", "info", "warning", "error")
+
+# 单条事件序列化后的字节上限；超过时截断最长的字符串字段。
+EVENT_LINE_MAX_BYTES = 8 * 1024
+# 被截断的字符串字段保留的字符数。
+EVENT_FIELD_MAX_CHARS = 2000
+EVENT_TRUNCATED_SUFFIX = "…(截断)"
+
+# 事件文件的读、写、轮转、清理都走这把锁，保证并发写入不撕裂行。
+_event_lock = threading.Lock()
 
 # 首次 install 时记下的原始钩子，重复 install 不再嵌套包装。
 _original_excepthook: Any = None
@@ -147,3 +165,203 @@ def _threading_excepthook(args: Any) -> None:
         original(args)
     elif hasattr(threading, "__excepthook__"):  # pragma: no branch - 标准库总有
         threading.__excepthook__(args)
+
+
+# --------------------------------------------------------------------------- #
+# 结构化事件日志（JSONL）
+# --------------------------------------------------------------------------- #
+def event_log_path() -> Path:
+    """事件日志主文件：``%LOCALAPPDATA%\\HydroHUD\\logs\\events.jsonl``。"""
+    return LOG_DIR() / EVENT_LOG_FILE_NAME
+
+
+def _coerce_event_value(value: Any) -> Any:
+    """把任意值转成 JSON 安全值；不可序列化的对象退回 ``repr()`` 字符串。"""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_coerce_event_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _coerce_event_value(item) for key, item in value.items()}
+    return repr(value)
+
+
+def _encode_event_line(payload: dict) -> bytes:
+    """把一条事件编码成一行 UTF-8 JSONL（含换行）。"""
+    return (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def _longest_string_slot(node: Any) -> tuple[Any, Any] | None:
+    """找出嵌套结构里最长的字符串值，返回 ``(容器, 键或下标)``。"""
+    best: tuple[Any, Any] | None = None
+    best_len = EVENT_FIELD_MAX_CHARS
+    stack: list[Any] = [node]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            for key, value in current.items():
+                if isinstance(value, str):
+                    if len(value) > best_len:
+                        best_len = len(value)
+                        best = (current, key)
+                else:
+                    stack.append(value)
+        elif isinstance(current, list):
+            for index, value in enumerate(current):
+                if isinstance(value, str):
+                    if len(value) > best_len:
+                        best_len = len(value)
+                        best = (current, index)
+                else:
+                    stack.append(value)
+    return best
+
+
+def _truncate_event_fields(payload: dict) -> None:
+    """反复截断最长字符串字段，直到整行不超过 ``EVENT_LINE_MAX_BYTES``。"""
+    while len(_encode_event_line(payload)) > EVENT_LINE_MAX_BYTES:
+        slot = _longest_string_slot(payload)
+        if slot is None:
+            return
+        container, key = slot
+        container[key] = container[key][:EVENT_FIELD_MAX_CHARS] + EVENT_TRUNCATED_SUFFIX
+
+
+def _event_log_files() -> list[Path]:
+    """主文件 + 所有轮转份（``.1`` 最新 … ``.KEEP`` 最旧）。"""
+    base = event_log_path()
+    return [base] + [
+        base.with_name(f"{base.name}.{index}") for index in range(1, EVENT_LOG_KEEP + 1)
+    ]
+
+
+def _rotate_event_logs(path: Path) -> None:
+    """轮转：删掉最旧份，``.N-1``→``.N``，主文件→``.1``。"""
+    keep = EVENT_LOG_KEEP
+    if keep <= 0:
+        path.unlink(missing_ok=True)
+        return
+    oldest = path.with_name(f"{path.name}.{keep}")
+    if oldest.exists():
+        oldest.unlink()
+    for index in range(keep - 1, 0, -1):
+        source = path.with_name(f"{path.name}.{index}")
+        if source.exists():
+            source.replace(path.with_name(f"{path.name}.{index + 1}"))
+    if path.exists():
+        path.replace(path.with_name(f"{path.name}.1"))
+
+
+def record(event: str, /, *, level: str = "info", **fields: Any) -> dict:
+    """记录一条结构化事件，返回实际构造出的 dict。
+
+    一行一条 JSON：``{"ts": ..., "level": ..., "event": ..., **fields}``。
+    ``ts`` 为带毫秒的本地时区 ISO8601；``level`` 不在 :data:`EVENT_LEVELS`
+    里时降级为 ``info``；值统一转成 JSON 安全类型，绝不因不可序列化而抛异常；
+    单条超过 8 KB 时截断最长的字符串字段。写盘失败只记 debug，不抛。
+    """
+    safe_level = level if level in EVENT_LEVELS else "info"
+    payload: dict[str, Any] = {
+        "ts": _datetime.datetime.now().astimezone().isoformat(timespec="milliseconds"),
+        "level": safe_level,
+        "event": event if isinstance(event, str) else str(event),
+    }
+    for key, value in fields.items():
+        payload[str(key)] = _coerce_event_value(value)
+
+    try:
+        _truncate_event_fields(payload)
+        line = _encode_event_line(payload)
+    except Exception as exc:  # pragma: no cover - 序列化兜底，正常值不会到这里
+        get_logger().debug("结构化事件序列化失败: %s", exc)
+        return payload
+
+    path = event_log_path()
+    with _event_lock:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            get_logger().debug("结构化事件目录创建失败: %s", exc)
+        try:
+            size = path.stat().st_size if path.exists() else 0
+        except OSError:
+            size = 0
+        if path.exists() and size + len(line) > EVENT_LOG_MAX_BYTES:
+            try:
+                _rotate_event_logs(path)
+            except Exception as exc:
+                get_logger().debug("结构化事件轮转失败: %s", exc)
+        try:
+            with path.open("ab") as handle:
+                handle.write(line)
+        except Exception as exc:
+            get_logger().debug("结构化事件写入失败: %s", exc)
+    return payload
+
+
+def _read_event_file(path: Path) -> list[dict]:
+    """读单个事件文件，跳过空行、坏 JSON 与非 dict 行。"""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    rows: list[dict] = []
+    for raw in text.splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            item = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(item, dict):
+            rows.append(item)
+    return rows
+
+
+def read_events(limit: int = 200, *, level: str | None = None) -> list[dict]:
+    """读取最近的结构化事件，按时间顺序（旧→新）返回。
+
+    为控制开销只读主文件与最新的 2 份轮转（``events.jsonl``、
+    ``events.jsonl.1``、``events.jsonl.2``），更旧的 ``.3`` 不读；
+    坏行跳过，不抛异常。``limit`` 上限 5000，``limit <= 0`` 返回空列表；
+    ``level`` 给定时只保留该等级（精确匹配）。
+    """
+    try:
+        cap = int(limit)
+    except (TypeError, ValueError):
+        cap = 0
+    if cap <= 0:
+        return []
+    cap = min(cap, 5000)
+
+    base = event_log_path()
+    collected: list[dict] = []
+    # 旧→新：先最旧的轮转份，最后主文件。
+    for index in range(min(2, EVENT_LOG_KEEP), -1, -1):
+        path = base if index == 0 else base.with_name(f"{base.name}.{index}")
+        collected.extend(_read_event_file(path))
+    if level is not None:
+        collected = [row for row in collected if row.get("level") == level]
+    return collected[-cap:]
+
+
+def clear_events() -> int:
+    """删掉主文件与所有轮转份，返回成功删掉的文件数；幂等。"""
+    removed = 0
+    with _event_lock:
+        for path in _event_log_files():
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                get_logger().debug("删除结构化事件文件失败: %s", exc)
+                continue
+            removed += 1
+    return removed
+
+
+def events_available() -> bool:
+    """主文件或任一轮转份存在时返回 True。"""
+    return any(path.exists() for path in _event_log_files())

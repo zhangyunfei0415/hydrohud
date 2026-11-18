@@ -12,7 +12,9 @@ The package is split into layers:
 - :mod:`hydrohud.tray`        system tray icon and menu
 - :mod:`hydrohud.hotkeys`     global hotkeys via RegisterHotKey
 - :mod:`hydrohud.playlist`    rotating project playlist
-- :mod:`hydrohud.diagnostics` crash and error log
+- :mod:`hydrohud.diagnostics` crash log plus the structured event journal
+- :mod:`hydrohud.i18n`        UI string catalogues (Simplified Chinese / English)
+- :mod:`hydrohud.pluginsandbox` static permission audit for layer plugins
 - :mod:`hydrohud.app`         the Tkinter desktop application
 
 Run it with ``python -m hydrohud`` or the packaged ``HydroHUD.exe``.
@@ -20,5 +22,5 @@ Run it with ``python -m hydrohud`` or the packaged ``HydroHUD.exe``.
 
 from __future__ import annotations
 
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 __all__ = ["__version__"]

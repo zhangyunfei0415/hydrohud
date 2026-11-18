@@ -7,7 +7,7 @@ import random
 import pytest
 from PIL import Image
 
-from hydrohud import device
+from hydrohud import device, devices
 
 
 def _noise_image(size: int = 480) -> Image.Image:
@@ -256,3 +256,298 @@ def test_encode_flash_image_reports_a_picture_it_cannot_fit() -> None:
 
 def test_flash_image_cap_is_below_the_firmware_ceiling() -> None:
     assert 0 < device.FLASH_IMAGE_MAX_BYTES < device.FLASH_MAX_BYTES
+
+
+# --------------------------------------------------------------------------- #
+# Multi-panel support: parent device ids, grouping, panel selection
+# --------------------------------------------------------------------------- #
+#: Two USB composite device instance ids as cfgmgr32 spells them. Only the last
+#: path segment is used for a label suffix, and the two differ there.
+PANEL_A = r"USB\VID_1A2C&PID_1520\SN-A1B2C3"
+PANEL_B = r"USB\VID_1A2C&PID_1520\SN-D4E5F6"
+
+
+def _info(
+    path: str,
+    *,
+    output_len: int = device.REPORT_LEN,
+    interface_index: int = devices.IMAGE_INTERFACE,
+    panel_id: str = "",
+) -> device.HidInfo:
+    """Build one collection description without touching a device."""
+    return device.HidInfo(
+        path=path,
+        vendor_id=device.VENDOR_ID,
+        product_id=device.PRODUCT_ID,
+        interface_index=interface_index,
+        input_len=output_len,
+        output_len=output_len,
+        feature_len=0,
+        panel_id=panel_id,
+    )
+
+
+def _control(path: str, *, panel_id: str = "") -> device.HidInfo:
+    return _info(
+        path,
+        output_len=device.CONTROL_REPORT_LEN,
+        interface_index=devices.CONTROL_INTERFACE,
+        panel_id=panel_id,
+    )
+
+
+def _panel(
+    panel_id: str,
+    image: device.HidInfo | None,
+    control: device.HidInfo | None,
+) -> device.PanelInfo:
+    return device.PanelInfo(
+        panel_id=panel_id,
+        label="TCOMAS LG600",
+        image=image,
+        control=control,
+        vendor_id=device.VENDOR_ID,
+        product_id=device.PRODUCT_ID,
+    )
+
+
+class _FakeCfgMgr32:
+    """Stand-in for the ``cfgmgr32`` DLL: ``byref`` arguments unwrap to the object.
+
+    The real symbols have ctypes `argtypes`, so a Python replacement receives the
+    same ``ctypes.byref(...)`` wrapper and writes through ``_obj``.
+    """
+
+    def __init__(
+        self,
+        parents: dict[int, int],
+        device_id: str = r"USB\VID_1A2C&PID_1520\SN-A1B2C3",
+        *,
+        parent_error: int = 0,
+        id_error: int = 0,
+    ) -> None:
+        self.parents = parents
+        self.device_id = device_id
+        self.parent_error = parent_error
+        self.id_error = id_error
+        self.parent_calls: list[int] = []
+        self.id_calls: list[int] = []
+
+    @staticmethod
+    def _store(argument: object, value: object) -> None:
+        target = getattr(argument, "_obj", argument)
+        target.value = value  # type: ignore[attr-defined]
+
+    def CM_Get_Parent(self, parent: object, devinst: int, flags: int) -> int:
+        self.parent_calls.append(devinst)
+        if self.parent_error:
+            return self.parent_error
+        self._store(parent, self.parents[devinst])
+        return 0
+
+    def CM_Get_Device_IDW(self, devinst: int, buffer: object, size: int, flags: int) -> int:
+        self.id_calls.append(devinst)
+        if self.id_error:
+            return self.id_error
+        buffer.value = self.device_id  # type: ignore[attr-defined]
+        return 0
+
+
+def test_parent_device_id_walks_two_levels_for_the_composite_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeCfgMgr32({11: 22, 22: 33})
+    monkeypatch.setattr(device, "cfgmgr32", fake)
+
+    assert device._parent_device_id(11) == fake.device_id
+    assert fake.parent_calls == [11, 22]
+    assert fake.id_calls == [33]
+
+
+def test_parent_device_id_gives_up_when_the_parent_walk_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeCfgMgr32({11: 22}, parent_error=0xD)  # CR_NO_SUCH_DEVNODE
+    monkeypatch.setattr(device, "cfgmgr32", fake)
+
+    assert device._parent_device_id(11) == ""
+    assert fake.parent_calls == [11]
+    assert fake.id_calls == []
+
+
+def test_parent_device_id_gives_up_when_the_instance_id_read_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeCfgMgr32({11: 22, 22: 33}, id_error=0xD)
+    monkeypatch.setattr(device, "cfgmgr32", fake)
+
+    assert device._parent_device_id(11) == ""
+    assert fake.id_calls == [33]
+
+
+def test_enumerate_panels_pairs_the_image_and_control_collections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = _info(r"\\?\hid#vid_1a2c&pid_1520&mi_01", panel_id=PANEL_A)
+    control = _control(r"\\?\hid#vid_1a2c&pid_1520&mi_00", panel_id=PANEL_A)
+    monkeypatch.setattr(device, "enumerate_collections", lambda *a, **k: [control, image])
+
+    (panel,) = device.enumerate_panels()
+
+    assert panel.ready is True
+    assert panel.panel_id == PANEL_A
+    assert panel.image is image
+    assert panel.control is control
+    assert (panel.vendor_id, panel.product_id) == (device.VENDOR_ID, device.PRODUCT_ID)
+    spec = devices.find_spec(device.VENDOR_ID, device.PRODUCT_ID)
+    assert spec is not None
+    assert panel.spec is spec
+    # One attached panel keeps the plain model label: nothing to disambiguate.
+    assert panel.label == spec.label
+
+
+def test_enumerate_panels_orders_by_panel_id_and_suffixes_the_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        device,
+        "enumerate_collections",
+        lambda *a, **k: [
+            _info("img-b", panel_id=PANEL_B),
+            _control("ctl-b", panel_id=PANEL_B),
+            _info("img-a", panel_id=PANEL_A),
+            _control("ctl-a", panel_id=PANEL_A),
+        ],
+    )
+    spec = devices.find_spec(device.VENDOR_ID, device.PRODUCT_ID)
+    assert spec is not None
+
+    panels = device.enumerate_panels()
+
+    assert [panel.panel_id for panel in panels] == [PANEL_A, PANEL_B]
+    # The last six characters of the instance id tell two same-model panels apart.
+    assert [panel.label for panel in panels] == [
+        f"{spec.label} · A1B2C3",
+        f"{spec.label} · D4E5F6",
+    ]
+    assert [panel.image.path if panel.image else None for panel in panels] == ["img-a", "img-b"]
+    assert all(panel.ready for panel in panels)
+
+
+def test_enumerate_panels_reports_a_panel_without_a_control_interface(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        device, "enumerate_collections", lambda *a, **k: [_info("img-a", panel_id=PANEL_A)]
+    )
+
+    (panel,) = device.enumerate_panels()
+
+    assert panel.ready is False
+    assert panel.image is not None
+    assert panel.control is None
+
+
+def test_enumerate_panels_is_empty_when_enumeration_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*args: object, **kwargs: object) -> list[device.HidInfo]:
+        raise OSError("SetupDiGetClassDevsW failed")
+
+    monkeypatch.setattr(device, "enumerate_collections", boom)
+
+    assert device.enumerate_panels() == []
+
+
+def test_enumerate_panels_groups_unidentified_collections_by_usb_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        device,
+        "enumerate_collections",
+        lambda *a, **k: [_info("img", panel_id=""), _control("ctl", panel_id="")],
+    )
+
+    (panel,) = device.enumerate_panels()
+
+    # Without a parent id both interfaces still pair up, as they did before
+    # multi-panel support, so a single panel keeps working when cfgmgr32 fails.
+    assert panel.panel_id == "usb:1A2C:1520"
+    assert panel.ready is True
+    assert panel.label == "TCOMAS LG600"  # one group: no suffix
+
+
+def test_find_panel_matches_a_panel_id_and_falls_back_to_the_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _panel(PANEL_A, _info("img-a", panel_id=PANEL_A), _control("ctl-a", panel_id=PANEL_A))
+    second = _panel(PANEL_B, _info("img-b", panel_id=PANEL_B), _control("ctl-b", panel_id=PANEL_B))
+    monkeypatch.setattr(device, "enumerate_panels", lambda *a, **k: [first, second])
+
+    assert device.find_panel() is first
+    assert device.find_panel("unknown-id") is first
+    assert device.find_panel(PANEL_B) is second
+
+
+def test_find_panel_reports_a_missing_panel(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(device, "enumerate_panels", lambda *a, **k: [])
+
+    with pytest.raises(RuntimeError, match="no HID device 1A2C:1520"):
+        device.find_panel()
+    with pytest.raises(RuntimeError, match="is the cooler plugged in"):
+        device.find_panel(PANEL_A)
+
+
+def test_enumerate_devices_reports_the_panel_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    image = _info(r"\\?\hid#vid_1a2c&pid_1520&mi_01", panel_id=PANEL_A)
+    monkeypatch.setattr(device, "enumerate_collections", lambda *a, **k: [image])
+
+    (entry,) = device.enumerate_devices()
+
+    assert entry["panel_id"] == PANEL_A
+    assert entry["role"] == "image"
+    assert entry["interface"] == "mi_01"
+
+
+def test_hidinfo_defaults_to_no_panel_id() -> None:
+    assert _info("some-path").panel_id == ""
+    assert device.HidInfo.__dataclass_fields__["panel_id"].default == ""
+
+
+def test_screen_accepts_a_resolved_hidinfo() -> None:
+    info = _info("/dev/hidraw1")
+    screen = device.Screen(info)
+
+    assert screen.info is info
+    assert screen.panel is None
+    assert screen.report_len == device.REPORT_LEN
+
+
+def test_screen_resolves_a_panel_info_lazily(monkeypatch: pytest.MonkeyPatch) -> None:
+    image = _info("img-a", panel_id=PANEL_A)
+    panel = _panel(PANEL_A, image, _control("ctl-a", panel_id=PANEL_A))
+    screen = device.Screen(panel)
+    assert screen.info is None
+    assert screen.panel is panel
+    asked: list[str | None] = []
+
+    def fake_find_panel(panel_id: str | None = None, **kwargs: object) -> device.PanelInfo:
+        asked.append(panel_id)
+        return panel
+
+    monkeypatch.setattr(device, "find_panel", fake_find_panel)
+
+    # Opening the screen re-reads the panel by id before using its image node.
+    assert screen._default_info() is image
+    assert asked == [PANEL_A]
+    assert screen.panel is panel
+
+
+def test_screen_fails_loudly_for_a_panel_without_an_image_interface(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    panel = _panel(PANEL_A, None, _control("ctl-a", panel_id=PANEL_A))
+    monkeypatch.setattr(device, "find_panel", lambda *a, **k: panel)
+
+    with pytest.raises(RuntimeError, match="no image interface"):
+        device.Screen(panel)._default_info()

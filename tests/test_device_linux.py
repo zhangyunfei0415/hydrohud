@@ -7,6 +7,8 @@ platform flag and the transport class, so nothing here touches a real panel.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
 from hydrohud import device, devices
@@ -273,3 +275,93 @@ def test_enumerate_devices_is_empty_when_the_scan_raises(
     monkeypatch.setattr(device, "enumerate_collections", boom)
 
     assert device.enumerate_devices() == []
+
+
+class _FakeNode:
+    """A hidraw node as `hydrohud.transport` reports it, with an optional serial.
+
+    `serial=None` leaves the attribute off entirely: that is how a node looks
+    when the kernel or the device does not expose a USB serial number.
+    """
+
+    def __init__(self, path: str, interface: int | None, serial: str | None) -> None:
+        self.path = path
+        self.vendor_id = device.VENDOR_ID
+        self.product_id = device.PRODUCT_ID
+        self.interface_number = interface
+        self.report_len: int | None = None
+        if serial is not None:
+            self.serial = serial
+
+
+def _linux_node_module(nodes: list[_FakeNode]) -> _TransportModule:
+    """A `transport` slice whose sysfs scan returns exactly `nodes`."""
+
+    class TransportModule(_TransportModule):
+        @staticmethod
+        def enumerate_hidraw(vendor_id: int, product_id: int) -> list[object]:
+            return list(nodes)
+
+    return TransportModule(RecordingTransport)
+
+
+@pytest.fixture
+def linux_nodes(monkeypatch: pytest.MonkeyPatch) -> Callable[[list[_FakeNode]], None]:
+    """Install a fake hidraw scan; returns the `install(nodes)` helper."""
+
+    def install(nodes: list[_FakeNode]) -> None:
+        monkeypatch.setattr(device, "_IS_LINUX", True)
+        monkeypatch.setattr(device, "transport_mod", _linux_node_module(nodes))
+
+    return install
+
+
+def test_linux_collections_group_both_interfaces_by_the_usb_serial(
+    linux_nodes: Callable[[list[_FakeNode]], None],
+) -> None:
+    linux_nodes(
+        [_FakeNode("/dev/hidraw0", 0, "SN-A1B2C3"), _FakeNode("/dev/hidraw1", 1, "SN-A1B2C3")]
+    )
+
+    collections = device.enumerate_collections()
+
+    assert [collection.panel_id for collection in collections] == [
+        "usb:SN-A1B2C3",
+        "usb:SN-A1B2C3",
+    ]
+    (panel,) = device.enumerate_panels()
+    assert panel.panel_id == "usb:SN-A1B2C3"
+    assert panel.ready is True
+
+
+def test_linux_collections_leave_the_panel_id_empty_without_a_serial(
+    linux_nodes: Callable[[list[_FakeNode]], None],
+) -> None:
+    linux_nodes([_FakeNode("/dev/hidraw0", 0, None), _FakeNode("/dev/hidraw1", 1, "")])
+
+    collections = device.enumerate_collections()
+
+    assert [collection.panel_id for collection in collections] == ["", ""]
+
+
+def test_linux_collections_of_two_serials_become_two_panels(
+    linux_nodes: Callable[[list[_FakeNode]], None],
+) -> None:
+    linux_nodes(
+        [
+            _FakeNode("/dev/hidraw0", 0, "SN-A1B2C3"),
+            _FakeNode("/dev/hidraw1", 1, "SN-A1B2C3"),
+            _FakeNode("/dev/hidraw2", 0, "SN-D4E5F6"),
+            _FakeNode("/dev/hidraw3", 1, "SN-D4E5F6"),
+        ]
+    )
+
+    panels = device.enumerate_panels()
+
+    assert [panel.panel_id for panel in panels] == ["usb:SN-A1B2C3", "usb:SN-D4E5F6"]
+    assert [panel.label for panel in panels] == [
+        "TCOMAS LG600 · A1B2C3",
+        "TCOMAS LG600 · D4E5F6",
+    ]
+    assert device.find_panel("usb:SN-D4E5F6").image is not None
+    assert device.find_panel("no-such-panel").panel_id == "usb:SN-A1B2C3"

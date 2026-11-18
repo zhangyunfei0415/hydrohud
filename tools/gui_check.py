@@ -121,6 +121,21 @@ def main(argv: list[str] | None = None) -> int:
     # 12) 待机图写入：编码 → 上传 → 进度 → 完成（全程桩设备，不碰真机）
     check("待机图写入流程", lambda: _check_flash_standby_write(root_app))
 
+    # 13) 多屏：面板下拉的显示规则与切换（禁止真的打开设备）
+    check("多屏面板选择", lambda: _check_panel_selection(root_app))
+
+    # 14) 插件权限审计：静态解析 + 越界识别 + 审计窗口
+    check("插件权限审计", lambda: _check_plugin_audit(root_app))
+
+    # 15) 语言切换：词条互译 + 设置持久化 + 菜单项存在
+    check("界面语言切换", lambda: _check_language_switch(root_app))
+
+    # 16) 事件日志：写一条、读回来、坏行不炸
+    check("事件日志读写", lambda: _check_event_log(root_app))
+
+    # 17) 预设库缩略图与排序字段
+    check("预设库缩略图排序", lambda: _check_preset_thumbnails(root_app))
+
     shot("final")
 
     root_app.on_close()  # 内含 shutdown + destroy，之后不能再操作窗口
@@ -164,15 +179,34 @@ def _open_preset_library(app) -> None:
 
 
 def _widget_text(widget) -> str:
-    """递归收集控件树里所有 Label 的文本，用于断言界面确实渲染了某段提示。"""
+    """递归收集控件树里所有文本，用于断言界面确实渲染了某段提示。
+
+    Label/Button 的文本在 ``text`` 选项里，``tk.Text`` 的正文要用 ``get`` 读，
+    两者都要收，否则审计窗口这类纯文本窗口在自检里看起来是空的。
+    """
     try:
         own = str(widget.cget("text"))
     except Exception:  # 不是带 text 选项的控件
         own = ""
+    if not own:
+        try:
+            own = str(widget.get("1.0", "end")).strip()
+        except Exception:  # 不是 tk.Text，或者已销毁
+            own = ""
     parts = [own]
     for child in widget.winfo_children():
         parts.append(_widget_text(child))
     return " ".join(part for part in parts if part)
+
+
+def _gridded(widget) -> bool:
+    """控件是否绑定了 grid 布局（窗口隐藏时 ``winfo_ismapped`` 恒为假，不能用）。"""
+    return bool(widget.grid_info())
+
+
+def _packed(widget) -> bool:
+    """控件是否绑定了 pack 布局（同样不能用 ``winfo_ismapped``）。"""
+    return widget.winfo_manager() == "pack"
 
 
 def _find_listbox_count(widget) -> int:
@@ -382,6 +416,10 @@ def _check_flash_standby_write(app) -> None:
     calls: dict[str, object] = {}
 
     class StubControl:
+        def __init__(self, target=None) -> None:
+            # 真实 Control 现在接受「目标面板」参数（多屏支持），桩也要吃得下。
+            calls["target_panel"] = target
+
         def open(self) -> StubControl:
             calls["opened"] = True
             return self
@@ -423,6 +461,214 @@ def _check_flash_standby_write(app) -> None:
     assert calls.get("closed") is True, "写完没有关掉控制口"
     assert calls.get("power") == [False, True], "写完没有关屏再开屏"
     assert "关屏再开屏" in _widget_text(app._rail.master), "界面没有提示需要关屏再开屏"
+
+
+def _check_panel_selection(app) -> None:
+    """多屏：单屏时下拉隐藏、多屏时显示并可按标签切换目标面板。
+
+    全程只用假的 PanelInfo，绝不打开真实设备（打开会占住 HID 接口）。
+    """
+    from hydrohud import device
+
+    one = [
+        device.PanelInfo(
+            panel_id="USB\\VID_1A2C&PID_1520\\ONE",
+            label="TCOMAS LG600",
+            image=None,
+            control=None,
+            vendor_id=0x1A2C,
+            product_id=0x1520,
+        )
+    ]
+    app._apply_panels(one)
+    assert app._panel_combo is not None, "设备卡缺少目标屏幕下拉框"
+    assert app._panel_target() is None, "只有一块屏时不该指定面板（保持原路径）"
+    assert not _packed(app._panel_row), "单屏时整行「目标屏幕」应该隐藏"
+
+    two = [
+        device.PanelInfo(
+            panel_id="USB\\VID_1A2C&PID_1520\\PANEL_A",
+            label="TCOMAS LG600 · PA0001",
+            image=None,
+            control=None,
+            vendor_id=0x1A2C,
+            product_id=0x1520,
+        ),
+        device.PanelInfo(
+            panel_id="USB\\VID_1A2C&PID_1520\\PANEL_B",
+            label="TCOMAS LG600 · PB0002",
+            image=None,
+            control=None,
+            vendor_id=0x1A2C,
+            product_id=0x1520,
+        ),
+    ]
+    app._apply_panels(two)
+    assert _packed(app._panel_row), "两块屏时「目标屏幕」整行应该显示"
+    assert _gridded(app._panel_combo), "两块屏时下拉框应该显示"
+    assert app._panel_target() is not None, "两块屏时应该指定目标面板"
+    assert app._panel_combo.cget("values") == (
+        "TCOMAS LG600 · PA0001",
+        "TCOMAS LG600 · PB0002",
+    ), "下拉框没有列全部面板"
+    app._panel_var.set("TCOMAS LG600 · PB0002")
+    app._on_panel_selected()
+    assert app._selected_panel_id.endswith("PANEL_B"), "切换面板没有更新选中 id"
+    assert "2/2" in str(app._chip_device.cget("text")), "顶栏 chip 没有显示第几块屏"
+
+    app._apply_panels([])
+    assert app._selected_panel_id == "", "面板清空后没有复位选中 id"
+    assert app._panel_target() is None, "面板清空后不该再指定面板"
+    assert not _packed(app._panel_row), "面板清空后「目标屏幕」整行应该隐藏"
+
+
+def _check_plugin_audit(app) -> None:
+    """插件权限审计：识别越界导入 + 审计窗口能列出结论。"""
+    import tempfile
+
+    from hydrohud import plugins, pluginsandbox
+
+    source = (
+        "import socket\n"
+        "PLUGIN = {\n"
+        '    "name": "auditprobe",\n'
+        '    "label": "审计探针",\n'
+        '    "permissions": ["network"],\n'
+        "}\n"
+    )
+    findings = pluginsandbox.audit_source(source)
+    assert pluginsandbox.required_permissions(findings) == ("network",)
+    assert pluginsandbox.undeclared_permissions(["network"], findings) == ()
+
+    sneaky = "import subprocess\nPLUGIN = {'name': 'sneaky'}\n"
+    findings = pluginsandbox.audit_source(sneaky)
+    missing = pluginsandbox.undeclared_permissions((), findings)
+    assert "subprocess" in missing, "没有识别出越界的子进程调用"
+    assert "不要安装" in pluginsandbox.summarize((), findings), "结论里没有风险提示"
+
+    with tempfile.TemporaryDirectory() as directory:
+        plug_dir = Path(directory)
+        (plug_dir / "auditprobe.py").write_text(source, encoding="utf-8")
+        original_dir = plugins.registry().plugin_dir
+        try:
+            plugins.registry().plugin_dir = plug_dir
+            app._on_reload_plugins()
+            summary, missing = app._plugin_audit("auditprobe")
+            assert "网络访问" in summary or "未发现越界" in summary, f"审计摘要异常：{summary}"
+            assert missing == (), "声明的权限被误判成越界"
+            app._on_audit_plugins()
+        finally:
+            plugins.registry().plugin_dir = original_dir
+            plugins.registry().discover()
+    assert app._plugin_audit_window is not None, "没有生成审计窗口"
+    text = _widget_text(app._plugin_audit_window)
+    assert "审计探针" in text or "auditprobe" in text, "审计窗口没有列出插件"
+    assert "网络访问" in text, "审计窗口没有显示权限的中文名"
+    app._plugin_audit_window.destroy()
+    app._plugin_audit_window = None
+
+
+def _check_language_switch(app) -> None:
+    """语言切换：两套词条互译、设置能落盘、菜单项齐全。"""
+    from hydrohud import i18n, settings
+
+    original = i18n.current_language()
+    try:
+        i18n.set_language("en")
+        assert i18n.t("rail.device") == "Device", "英文词条没生效"
+        assert i18n.t("card.preview") == "Live preview"
+        i18n.set_language("zh")
+        assert i18n.t("rail.device") == "设备", "切回中文没生效"
+        assert i18n.missing_keys("en") == (), "英文词条有缺失"
+        assert i18n.missing_keys("zh") == (), "中文词条有缺失"
+
+        app._on_set_language("en")
+        assert i18n.current_language() == "en", "界面语言没有切换"
+        assert settings.get("language") == "en", "语言设置没有写进配置"
+        assert app._language_var.get() == "en"
+        # 已建好的控件要跟着换文案，不能只有词条层变了。
+        rail_text = _widget_text(app._rail)
+        assert "Device" in rail_text and "Presets" in rail_text, f"图标栏没有重译：{rail_text}"
+        app._on_set_language("zh")
+        assert i18n.current_language() == "zh"
+        assert settings.get("language") == "zh"
+        rail_text = _widget_text(app._rail)
+        assert "设备" in rail_text and "预设" in rail_text, f"图标栏没有切回中文：{rail_text}"
+    finally:
+        i18n.set_language(original)
+
+
+def _check_event_log(app) -> None:
+    """事件日志：写一条能读回、级别可过滤、坏行不炸。"""
+    from hydrohud import diagnostics
+
+    diagnostics.clear_events()
+    diagnostics.record("gui_check_probe", level="info", frames=12, note="自检")
+    events = diagnostics.read_events(limit=10)
+    assert events, "刚写的事件没有读回来"
+    latest = events[-1]
+    assert latest.get("event") == "gui_check_probe", "事件名不对"
+    assert latest.get("frames") == 12, "字段没有落盘"
+    assert latest.get("level") == "info"
+    assert diagnostics.read_events(limit=10, level="error") == [], "级别过滤失效"
+    assert diagnostics.events_available() is True
+
+    app._open_event_log()  # 只打开目录，不弹窗
+    diagnostics.clear_events()
+
+
+def _check_preset_thumbnails(app) -> None:
+    """预设库：列表行带评分/下载量、排序键可用、选中后详情用 describe_entry。"""
+    import tempfile
+    from unittest import mock
+
+    from hydrohud import presetslib
+
+    entries = [
+        {"name": "低分预设", "rating": 2.0, "downloads": 3},
+        {"name": "高分预设", "rating": 4.9, "downloads": 12000},
+    ]
+    assert presetslib.sort_entries(entries, "rating")[0]["name"] == "高分预设", "按评分排序失败"
+    assert presetslib.sort_entries(entries, "downloads")[0]["name"] == "高分预设", "按下载排序失败"
+    # 名称排序按码位升序：「低分预设」的「低」(U+4F4E) 排在「高」(U+9AD8) 之前。
+    assert presetslib.sort_entries(entries, "name")[0]["name"] == "低分预设", "按名称排序失败"
+
+    from hydrohud.app import _preset_list_line
+
+    text = _preset_list_line(entries[1])
+    assert "4.9 分" in text and "12000 下载" in text, f"列表行没有带评分下载量：{text}"
+
+    describe = presetslib.describe_entry(entries[1])
+    assert "高分预设" in describe and "4.9" in describe, f"describe_entry 输出异常：{describe}"
+
+    scene = {"name": "缩略图预设", "layers": []}
+    probe = dict(entries[1], scene=scene, thumbnail="https://example.invalid/t.png")
+    with tempfile.TemporaryDirectory() as directory:
+        thumb = Path(directory) / "t.png"
+        thumb.write_bytes(b"\x89PNG\r\n")
+
+        def fake_download(entry, timeout=None):
+            return thumb
+
+        with (
+            mock.patch.object(presetslib, "index_or_cache", lambda *a, **k: ([probe], False)),
+            mock.patch.object(presetslib, "download_thumbnail", fake_download),
+        ):
+            app._on_open_preset_library()
+            dialog = app._preset_library
+            assert dialog is not None, "预设库窗口没有创建"
+            import time
+
+            for _ in range(200):
+                app.update()
+                if _find_listbox_count(dialog) > 0:
+                    break
+                time.sleep(0.01)
+            assert app._preset_entries, "列表没有填充条目"
+            assert app._preset_sort_box is not None, "缺少排序下拉框"
+            assert "评分" in app._preset_sort_box.cget("values")
+            dialog.destroy()
+            app._preset_library = None
 
 
 def _token_text() -> None:

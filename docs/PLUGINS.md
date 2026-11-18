@@ -114,9 +114,43 @@ PLUGIN = {
 
 ## permissions
 
-`permissions` 接受字符串或字符串列表，规整成小写去重元组（`plugins._normalize_permissions`）。当前识别的值是 `"network"` 与 `"filesystem"`，编辑器会显示 `需要网络访问、文件读写（仅供参考，不做强制）`。
+`permissions` 接受字符串或字符串列表，规整成小写去重元组（`plugins._normalize_permissions`）。当前识别的值是 `"network"`、`"filesystem"` 与 `"subprocess"`。
 
-**这只是声明，HydroHUD 不做任何拦截**：插件仍然拥有完整进程权限。它的意义是让用户在装第三方插件前能一眼看到「这个插件要联网」，而不是安全边界。真正的沙箱（子进程 + 限权）仍在 v2.0 计划里，见 [ROADMAP.md](../ROADMAP.md)。
+**这只是声明，HydroHUD 不做任何拦截**：插件仍然拥有完整进程权限。它的意义是让用户在装第三方插件前能一眼看到「这个插件要联网」，而不是安全边界。
+
+## 权限审计（v1.7）
+
+v1.7 起装插件前后都能查「它实际会碰什么」，实现是 `hydrohud/pluginsandbox.py`：静态解析插件源码里的
+`import` 与危险调用，和 `PLUGIN` 里声明的 `permissions` 对比。
+
+```python
+from hydrohud import pluginsandbox
+
+findings = pluginsandbox.audit_file("插件目录/stamp.py")       # list[Finding]，每条带 permission/symbol/line
+required = pluginsandbox.required_permissions(findings)        # ("network", ...)
+declared = pluginsandbox.declared_permissions(spec)            # PLUGIN["permissions"] 规整后
+missing = pluginsandbox.undeclared_permissions(declared, findings)   # 实际用了但没声明的
+print(pluginsandbox.summarize(declared, findings))             # 给界面显示的一行中文结论
+```
+
+审计表（`AUDIT_PERMISSIONS` 决定分类）：
+
+| 类别 | 命中符号 |
+| --- | --- |
+| `network` | `socket` `ssl` `urllib` `http` `ftplib` `smtplib` `telnetlib` `xmlrpc` `requests` `httpx` `aiohttp` `websockets` `asyncio` |
+| `filesystem` | `os`，以及内置的 `open` / `eval` / `exec` / `compile` / `__import__` |
+| `subprocess` | `subprocess` `multiprocessing` `ctypes`，以及 `os.system` / `os.popen` / `os.exec*` / `os.spawn*` |
+
+`pathlib` / `shutil` / `tempfile` / `glob` / `io` 刻意不标红：它们本身不越界，标了只会让清单全是噪音。
+
+界面上有两个入口：「帮助 → 插件权限审计…」列出所有插件的声明 / 审计 / 越界项；图层编辑器里选中插件图层后，
+那一行直接显示「声明：…；<审计结论>」，有越界调用时变黄。
+
+**明确说清楚：审计不是沙箱。** `pluginsandbox` 只做源码静态检查（正则级别的符号匹配），下面这些都能绕过它：
+`sys.modules` 里已缓存的模块、`importlib._bootstrap`、`exec`/`eval` 拼出来的代码、`ctypes` 直接调系统 API。
+`restricted_imports()` 那个上下文管理器替换的是 `builtins.__import__`，是进程级全局替换，只能防最直白的越界
+导入，不能做线程隔离，也不保证恶意代码拦得住。定位就是「给用户一份可读的权限清单」，真沙箱（子进程 + 限权）
+仍在 v2.0 计划里，见 [ROADMAP.md](../ROADMAP.md)。
 
 ## 测试自己的插件
 

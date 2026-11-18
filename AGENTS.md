@@ -41,7 +41,7 @@ HydroHUD is an open-source controller for the **TCOMAS LG600** AIO liquid cooler
 
 | Module | Owns | Never touches |
 | --- | --- | --- |
-| `device.py` | HID enumeration, packet framing, JPEG encoding, `Screen`, `Control` (incl. flash upload), vendor-process handling, device-table lookup (`detected_spec`/`describe_panel`) | Tk, scenes, sensors |
+| `device.py` | HID enumeration, packet framing, JPEG encoding, `Screen`, `Control` (incl. flash upload), vendor-process handling, device-table lookup (`detected_spec`/`describe_panel`), multi-panel identity (`PanelInfo`/`enumerate_panels`/`find_panel` via the USB composite instance id) | Tk, scenes, sensors |
 | `render.py` | scene dict → `PIL.Image`; layer painters (15 types), background painters (solid/image/gif/video/**capture**), LRU caches, plugin dispatch for unknown layer types | device, Tk |
 | `scenes.py` | schema defaults/validation (`normalize_scene`), 12 presets, `.hud.json` load/save | device, Tk |
 | `sensors.py` | 23 metrics, `SensorHub` (0.5 s throttle + 120-sample history), NVML / Win32 / LHM-shared-memory backends | Tk, device |
@@ -50,14 +50,16 @@ HydroHUD is an open-source controller for the **TCOMAS LG600** AIO liquid cooler
 | `editor.py` | canvas editor geometry: `layer_bounds`/`hit_test`/`snap_offset`/`drag_selection`/`resize_layer` as pure functions + a thin `tk.Frame` wrapper | app state, device |
 | `themepack.py` | `.hudpack` export/import (scene + referenced assets as zip) | rendering |
 | `plugins.py` | layer-plugin registry (`%APPDATA%\HydroHUD\plugins`), `ParamSpec` parameter schema + `normalize_params`/`coerce_param`, discovery isolation, per-plugin quarantine (`MAX_CONSECUTIVE_ERRORS`), `draw_layer` dispatch | Tk, device |
-| `presetslib.py` | community preset index (remote JSON + offline cache), `install_preset` via `scenes.save_project` — data only, never executes code | Tk, device |
+| `presetslib.py` | community preset index (remote JSON + offline cache), `install_preset` via `scenes.save_project` — data only, never executes code; index schema also carries `thumbnail`/`rating`/`downloads` with a hashed thumbnail cache and `sort_entries` | Tk, device |
 | `api.py` | local HTTP control plane (`127.0.0.1:4780`, token auth), SSE `/events`, WebSocket `/ws` | Tk (callers marshal to the UI thread) |
 | `hudctl.py` | CLI client for that API (argparse + urllib) | in-process state |
 | `qrmini.py` | pure-Python QR encoder (byte mode, v1–20, L/M/Q/H) — zero runtime deps | rendering |
 | `weather.py` `media.py` `capture.py` | data sources: Open-Meteo (cached, offline-tolerant) / Windows SMTC (optional `winsdk`) / screen grab (`ImageGrab`) | Tk, device |
 | `devices.py` | device table (`DeviceSpec`: VID/PID, report lengths, chunk sizes, `verified`) | I/O |
-| `transport.py` | `Transport` protocol, `FakeTransport` (tests), Linux `HidrawTransport` + sysfs enumeration | Windows HID |
-| `settings.py` `autostart.py` `tray.py` `hotkeys.py` `playlist.py` `diagnostics.py` | persistence, Run key, Shell_NotifyIconW, RegisterHotKey, rotation list, crash log | domain logic |
+| `transport.py` | `Transport` protocol, `FakeTransport` (tests), Linux `HidrawTransport` + sysfs enumeration, `HidrawInfo.serial` from sysfs for stable panel identity | Windows HID |
+| `i18n.py` | UI string catalogues (`zh`/`en`, key-for-key), `set_language`/`t`, `missing_keys`; the GUI keeps a `_i18n_widgets` registry so a language switch retranslates widgets in place | Tk, device |
+| `pluginsandbox.py` | static permission audit for layer plugins: `audit_source`/`audit_file`, `declared_permissions`, `required_permissions`, `undeclared_permissions`, `summarize`, `restricted_imports`. **A readable report, not a sandbox** | Tk, device |
+| `settings.py` `autostart.py` `tray.py` `hotkeys.py` `playlist.py` `diagnostics.py` | persistence, Run key, Shell_NotifyIconW, RegisterHotKey, rotation list, crash log, and the structured event journal (`record`/`read_events`, 512 KiB rotation × 3) | domain logic |
 
 **Data flow for a new layer type:** `scenes.py` (defaults + validation) → `render.py` (`_draw_*_layer`,
 `_render_layer` dispatch, `_DYNAMIC_TYPES`, cache signature) → `app.py` (`layer_label`, `_add_layer` defaults,
@@ -137,7 +139,7 @@ Then in `hydrohud/render.py`: write `_draw_thermometer_layer(draw, layer, values
 ## 6. Commands
 
 ```powershell
-C:\Python314\python.exe -m pytest tests -q          # 987 tests, all pure-software
+C:\Python314\python.exe -m pytest tests -q          # 1194 tests, all pure-software
 C:\Python314\python.exe -m black --line-length 100 hydrohud tests tools
 C:\Python314\python.exe -m ruff check hydrohud tests tools       # pyproject.toml holds the shared config
 C:\Python314\python.exe -m hydrohud                 # run from source
@@ -146,7 +148,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1 -Clean   # → dist\HydroHUD.
 C:\Python314\python.exe tools\check_device.py       # real hardware self-check
 C:\Python314\python.exe tools\verify_v11.py         # real-device fps regression (v1.1 scene)
 C:\Python314\python.exe -X utf8 tools\verify_v13.py  # real-device v1.3 scene: static + capture rounds
-C:\Python314\python.exe -X utf8 tools\gui_check.py  # headless GUI integration sweep (46 checks)
+C:\Python314\python.exe -X utf8 tools\gui_check.py  # headless GUI integration sweep (51 checks)
 C:\Python314\python.exe -X utf8 tools\render_previews.py    # regenerate preview/ + contact sheet
 C:\Python314\python.exe -X utf8 -m hydrohud.hudctl status   # CLI client for the local API (GUI must be running)
 C:\Python314\python.exe -X utf8 tools\build_docs.py --strict  # → build\docs-site\docs (site source tree)
@@ -166,6 +168,7 @@ whole window, then exits 0. Use it before claiming a UI change works.
 | Does control `0x11` rotate the picture? | **No**, it only stores the quadrant. Rotate pixels in software. | Hardware test: no visible change; vendor `XYUI` does software rotation. |
 | Does `read()` include the report id on Windows? | **No** with cython-hidapi (440-byte reply vs 441 with hidraw). Parse defensively. | liquidctl driver work on the same panel. |
 | Max sustained frame rate? | ~500 fps free-running; 30 fps costs ~6 % of the bus. | Throughput benchmark. |
+| How are two identical panels told apart? | **Not** by the HID path (only the bus address differs and it changes on every replug) and **not** by HID string descriptors (serial/manufacturer/product all come back empty on this hardware). Use the **USB composite device instance id**: `CM_Get_Parent` two levels up from the interface's `DevInst`, then `CM_Get_Device_IDW` (e.g. `USB\VID_1A2C&PID_1520\A247392SS000000`). Both interfaces report the same value for one physical panel. On Linux read the sysfs `serial`. | `device._parent_device_id()`, `device.enumerate_panels()`; verified on hardware. |
 
 ## 8. Style rules for contributors (human or agent)
 

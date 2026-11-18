@@ -30,6 +30,7 @@ GITHUB = "https://github.com/zhangyunfei0415/hydrohud"
 #: Repository file -> page path inside the site.
 PAGES = {
     "README.md": "index.md",
+    "README.en.md": "index.en.md",
     "ROADMAP.md": "roadmap.md",
     "AGENTS.md": "agents.md",
     "docs/LAYERS.md": "layers.md",

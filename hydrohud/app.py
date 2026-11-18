@@ -143,6 +143,8 @@ plugins_mod = _import_optional("plugins")
 api_mod = _import_optional("api")
 themepack_mod = _import_optional("themepack")
 presetslib_mod = _import_optional("presetslib")
+pluginsandbox_mod = _import_optional("pluginsandbox")
+i18n_mod = _import_optional("i18n")
 
 try:  # 版本号来自包 __init__，缺失时退回内置值
     from . import __version__ as APP_VERSION
@@ -168,7 +170,11 @@ THEME_PACK_FILETYPES = [("HydroHUD 主题包", "*.hudpack"), ("所有文件", "*
 PLUGIN_DIR_NAME = "plugins"
 VENDOR_ASSET_DIR = r"C:\Program Files (x86)\TcomasSoftware"
 #: 插件 permissions 声明在编辑器里的中文说明（只用于提示，不做任何强制）。
-_PERMISSION_LABELS = {"network": "网络访问", "filesystem": "文件读写"}
+_PERMISSION_LABELS = {
+    "network": "网络访问",
+    "filesystem": "文件读写",
+    "subprocess": "启动子进程",
+}
 
 # --------------------------------------------------------------------------- #
 # 主题
@@ -333,6 +339,89 @@ def _vendor_standby_asset() -> str | None:
         if os.path.isfile(path):
             return path
     return None
+
+
+def _t(key: str, **fields: Any) -> str:
+    """界面文案：i18n 模块可用时按当前语言取词条，否则把 key 原样返回。"""
+    if i18n_mod is not None:
+        try:
+            return str(i18n_mod.t(key, **fields))
+        except Exception:  # 词条缺失不应让界面崩
+            return key
+    return key
+
+
+def _language() -> str:
+    """当前界面语言代码（i18n 不可用时固定中文）。"""
+    if i18n_mod is not None:
+        try:
+            return str(i18n_mod.current_language())
+        except Exception:
+            return "zh"
+    return "zh"
+
+
+def _language_choices() -> tuple[tuple[str, str], ...]:
+    """可选语言（代码, 标签）；i18n 不可用时只给中文一项。"""
+    if i18n_mod is not None:
+        try:
+            choices = tuple(i18n_mod.available_languages())
+            if choices:
+                return choices
+        except Exception:
+            pass
+    return (("zh", "简体中文"),)
+
+
+def _language_label(code: str) -> str:
+    """语言代码转界面标签（找不到就回代码本身）。"""
+    for candidate, label in _language_choices():
+        if candidate == code:
+            return label
+    return code
+
+
+def _record_event(event: str, *, level: str = "info", **fields: Any) -> None:
+    """写一条结构化事件日志；日志模块缺失或写失败都不影响主流程。"""
+    if diagnostics_mod is None:
+        return
+    recorder = getattr(diagnostics_mod, "record", None)
+    if not callable(recorder):
+        return
+    try:
+        recorder(event, level=level, **fields)
+    except Exception as exc:  # 记日志失败绝不能打断用户操作
+        _warn_once(f"写事件日志失败：{exc}")
+
+
+def _enumerate_panels_safe() -> list[Any]:
+    """枚举物理面板；设备层缺失或平台不支持时返回空列表而不是抛异常。
+
+    枚举只读设备节点，绝不打开发送，所以可以在后台线程里随便调。
+    """
+    if device_mod is None:
+        return []
+    enumerator = getattr(device_mod, "enumerate_panels", None)
+    if not callable(enumerator):
+        return []
+    try:
+        return list(enumerator())
+    except Exception as exc:  # 枚举失败只影响多屏选择，不影响单屏使用
+        _warn_once(f"枚举多块屏幕失败：{exc}")
+        return []
+
+
+def _preset_list_line(entry: dict) -> str:
+    """预设库里一行列表文字：名称 + 评分/下载量（有则显示）。"""
+    name = str(entry.get("name") or "未命名预设")
+    extras: list[str] = []
+    rating = entry.get("rating")
+    if isinstance(rating, (int, float)) and rating > 0:
+        extras.append(f"{rating:.1f} 分")
+    downloads = entry.get("downloads")
+    if isinstance(downloads, int) and downloads > 0:
+        extras.append(f"{downloads} 下载")
+    return f"{name} · {' · '.join(extras)}" if extras else name
 
 
 def _device_missing_line() -> str:
@@ -887,11 +976,20 @@ class App(tk.Tk):
         self._ctl_lock = threading.Lock()
         self._control: Any | None = None
         self._detected: list[dict] | None = None
+        # 多屏：冷却头的屏幕可能不止一块，枚举出的面板列表与当前选中的面板 id。
+        # panel_id 由 device.enumerate_panels() 给出，跨重新插拔保持稳定。
+        self._panels: list[Any] = []
+        self._selected_panel_id = ""
+        self._panel_var: tk.StringVar | None = None
+        self._panel_combo: ttk.Combobox | None = None
+        self._panel_hint: tk.Label | None = None
+        self._panel_row: tk.Frame | None = None
         self._stream_stop = threading.Event()
         self._stream_thread: threading.Thread | None = None
         self._stream_fps = 30.0
         self._stream_frames = 0
         self._stream_started_at = 0.0
+        self._stream_panel: Any | None = None
         self._photo: ImageTk.PhotoImage | None = None
         self._canvas_img_id: int | None = None
         self._last_frame_img: Image.Image | None = None
@@ -946,12 +1044,19 @@ class App(tk.Tk):
         self._canvas_editor: Any | None = None
         self._editor_mode = False
         self._plugin_row: tk.Frame | None = None
+        self._plugin_audit_window: tk.Toplevel | None = None
+        self._preset_entries: list[dict] | None = None
+        self._preset_thumb_label: tk.Label | None = None
+        self._preset_sort_box: ttk.Combobox | None = None
+        self._preset_sort_var: tk.StringVar | None = None
         self._preset_library: tk.Toplevel | None = None
         self._api: Any | None = None
         self._api_host: Any | None = None
         self._api_status: dict = {}
         self._ticker_var: tk.StringVar | None = None
         self._canvas_pending_base: dict | None = None
+        #: 需要在切换语言后改文案的控件：(控件, 词条 key)。
+        self._i18n_widgets: list[tuple[Any, str]] = []
 
         if history_mod is not None:
             try:
@@ -968,6 +1073,7 @@ class App(tk.Tk):
         self.report_callback_exception = self._on_tk_callback_error
 
         self._build_theme()
+        self._load_language()
         self._build_menu()
         self._build_ui()
         self._refresh_presets()
@@ -1193,6 +1299,7 @@ class App(tk.Tk):
             font=(FONT_FAMILY, 10),
         )
         menubar = tk.Menu(self, **menu_options)
+        self._menubar = menubar
         file_menu = tk.Menu(menubar, **menu_options)
         file_menu.add_command(label="新建项目", accelerator="Ctrl+N", command=self._on_new_project)
         file_menu.add_command(
@@ -1212,7 +1319,7 @@ class App(tk.Tk):
         )
         file_menu.add_separator()
         file_menu.add_command(label="退出", command=self.on_close)
-        menubar.add_cascade(label="文件", menu=file_menu)
+        menubar.add_cascade(label=_t("menu.file"), menu=file_menu)
 
         playlist_menu = tk.Menu(menubar, **menu_options)
         playlist_menu.add_command(label="加入当前工程到轮播", command=self._on_add_to_playlist)
@@ -1221,7 +1328,7 @@ class App(tk.Tk):
         playlist_menu.add_separator()
         playlist_menu.add_command(label="设置轮播间隔…", command=self._on_playlist_interval)
         playlist_menu.add_command(label="清空轮播列表", command=self._on_clear_playlist)
-        menubar.add_cascade(label="轮播", menu=playlist_menu)
+        menubar.add_cascade(label=_t("menu.playlist"), menu=playlist_menu)
 
         device_menu = tk.Menu(menubar, **menu_options)
         device_menu.add_command(label="检测设备（只枚举，不打开）", command=self._on_detect)
@@ -1236,7 +1343,7 @@ class App(tk.Tk):
         device_menu.add_separator()
         device_menu.add_command(label="开始推送到屏幕", command=self._on_start_stream)
         device_menu.add_command(label="停止推送", command=self._on_stop_stream)
-        menubar.add_cascade(label="设备", menu=device_menu)
+        menubar.add_cascade(label=_t("menu.device"), menu=device_menu)
 
         edit_menu = tk.Menu(menubar, **menu_options)
         edit_menu.add_command(label="撤销", accelerator="Ctrl+Z", command=self._undo)
@@ -1245,40 +1352,52 @@ class App(tk.Tk):
         edit_menu.add_command(
             label="画布编辑（拖动图层）", accelerator="Ctrl+E", command=self._toggle_canvas_edit
         )
-        menubar.add_cascade(label="编辑", menu=edit_menu)
+        menubar.add_cascade(label=_t("menu.edit"), menu=edit_menu)
 
         theme_menu = tk.Menu(menubar, **menu_options)
         theme_menu.add_command(label="导出主题包…", command=self._on_export_theme)
         theme_menu.add_command(label="导入主题包…", command=self._on_import_theme)
         theme_menu.add_separator()
         theme_menu.add_command(label="导入官方素材到素材库", command=self._on_import_vendor_assets)
-        menubar.add_cascade(label="主题包", menu=theme_menu)
+        menubar.add_cascade(label=_t("menu.theme"), menu=theme_menu)
 
         plugin_menu = tk.Menu(menubar, **menu_options)
         plugin_menu.add_command(label="重载图层插件", command=self._on_reload_plugins)
         plugin_menu.add_separator()
         plugin_menu.add_command(label="打开插件目录", command=self._on_open_plugin_dir)
-        menubar.add_cascade(label="插件", menu=plugin_menu)
+        menubar.add_cascade(label=_t("menu.plugin"), menu=plugin_menu)
 
         community_menu = tk.Menu(menubar, **menu_options)
         community_menu.add_command(label="预设库…", command=self._on_open_preset_library)
         community_menu.add_command(label="打开预设目录", command=self._on_open_presets_dir)
-        menubar.add_cascade(label="社区", menu=community_menu)
+        menubar.add_cascade(label=_t("menu.community"), menu=community_menu)
 
         advanced_menu = tk.Menu(menubar, **menu_options)
         advanced_menu.add_command(label="启动 / 停止本地 API", command=self._on_toggle_api)
         advanced_menu.add_command(label="复制 API Token", command=self._on_copy_api_token)
-        menubar.add_cascade(label="高级", menu=advanced_menu)
+        menubar.add_cascade(label=_t("menu.advanced"), menu=advanced_menu)
 
         window_menu = tk.Menu(menubar, **menu_options)
         window_menu.add_command(label="隐藏到系统托盘", command=self._hide_to_tray)
         window_menu.add_command(label="显示窗口", command=self._show_window)
-        menubar.add_cascade(label="窗口", menu=window_menu)
+        menubar.add_cascade(label=_t("menu.window"), menu=window_menu)
 
         help_menu = tk.Menu(menubar, **menu_options)
+        language_menu = tk.Menu(help_menu, **menu_options)
+        self._language_var = tk.StringVar(value=_language())
+        for code, label in _language_choices():
+            language_menu.add_radiobutton(
+                label=label,
+                value=code,
+                variable=self._language_var,
+                command=lambda chosen=code: self._on_set_language(chosen),
+            )
+        help_menu.add_cascade(label="界面语言", menu=language_menu)
+        help_menu.add_command(label="插件权限审计…", command=self._on_audit_plugins)
+        help_menu.add_command(label="打开事件日志", command=self._open_event_log)
         help_menu.add_command(label="打开日志目录", command=self._open_log_folder)
         help_menu.add_command(label="关于 HydroHUD", command=self._on_about)
-        menubar.add_cascade(label="帮助", menu=help_menu)
+        menubar.add_cascade(label=_t("menu.help"), menu=help_menu)
         self.configure(menu=menubar)
 
     def _build_ui(self) -> None:
@@ -1292,14 +1411,15 @@ class App(tk.Tk):
         tk.Label(brand, text="HydroHUD", bg=BG, fg=TEXT, font=(FONT_FAMILY, 18, "bold")).pack(
             anchor="w"
         )
-        tk.Label(
+        subtitle = tk.Label(
             brand,
-            text="TCOMAS LG600 水冷屏 · 开源控制台 · MIT License",
+            text=_t("header.subtitle"),
             bg=BG,
             fg=MUTED,
             font=(FONT_FAMILY, 9),
-        ).pack(anchor="w")
-
+        )
+        subtitle.pack(anchor="w")
+        self._i18n_widgets.append((subtitle, "header.subtitle"))
         badge = tk.Frame(header, bg=BADGE_BG, highlightthickness=1, highlightbackground=ACCENT_2)
         badge.pack(side="left", padx=(14, 0))
         tk.Label(
@@ -1372,25 +1492,29 @@ class App(tk.Tk):
         tk.Label(logo, text="H", bg=ACCENT_2, fg=DARK_INK, font=(FONT_FAMILY, 16, "bold")).pack(
             expand=True
         )
-        for glyph, caption, command in (
-            ("◉", "设备", self._on_detect),
-            ("▤", "预设", lambda: self._select_editor_tab(0)),
-            ("▣", "背景", lambda: self._select_editor_tab(1)),
-            ("☰", "图层", lambda: self._select_editor_tab(2)),
-            ("◐", "主题", self._on_open_preset_library),
-            ("ⓘ", "关于", self._on_about),
+        for glyph, key, command in (
+            ("◉", "rail.device", self._on_detect),
+            ("▤", "rail.preset", lambda: self._select_editor_tab(0)),
+            ("▣", "rail.background", lambda: self._select_editor_tab(1)),
+            ("☰", "rail.layer", lambda: self._select_editor_tab(2)),
+            ("◐", "rail.theme", self._on_open_preset_library),
+            ("ⓘ", "rail.about", self._on_about),
         ):
-            self._rail_button(rail, glyph, caption, command)
+            self._rail_button(rail, glyph, _t(key), command, caption_key=key)
         self._rail_dot = tk.Label(rail, text="●", bg=RAIL_BG, fg=MUTED, font=(FONT_FAMILY, 13))
         self._rail_dot.pack(side="bottom", pady=(0, 14))
 
-    def _rail_button(self, rail: tk.Frame, glyph: str, caption: str, command) -> None:
+    def _rail_button(
+        self, rail: tk.Frame, glyph: str, caption: str, command, *, caption_key: str = ""
+    ) -> None:
         item = tk.Frame(rail, bg=RAIL_BG)
         item.pack(fill="x", padx=6, pady=3)
         icon = tk.Label(item, text=glyph, bg=RAIL_BG, fg=MUTED, font=(FONT_FAMILY, 13))
         icon.pack(pady=(6, 0))
         text = tk.Label(item, text=caption, bg=RAIL_BG, fg="#64748B", font=(FONT_FAMILY, 7))
         text.pack(pady=(0, 5))
+        if caption_key:
+            self._i18n_widgets.append((text, caption_key))
 
         def paint(color: str) -> None:
             for widget in (item, icon, text):
@@ -1454,8 +1578,19 @@ class App(tk.Tk):
         )
 
     @staticmethod
-    def _card(parent: tk.Widget, title: str, subtitle: str = "") -> tuple[tk.Frame, tk.Frame]:
-        """卡片式分区：暗色底 + 1px 边框 + 顶部渐变细线 + 标题（左侧强调色竖条）。"""
+    def _card(
+        parent: tk.Widget,
+        title: str,
+        subtitle: str = "",
+        *,
+        title_key: str = "",
+        registry: list[Any] | None = None,
+    ) -> tuple[tk.Frame, tk.Frame]:
+        """卡片式分区：暗色底 + 1px 边框 + 顶部渐变细线 + 标题（左侧强调色竖条）。
+
+        ``title_key`` 给出时把标题控件登记进 ``registry``，切换语言后由
+        :meth:`_retranslate` 统一改写，这样卡片标题也能跟着语言走。
+        """
         card = tk.Frame(parent, bg=CARD, highlightthickness=1, highlightbackground=BORDER, bd=0)
         edge = tk.Frame(card, bg=ACCENT, height=2)
         edge.pack(fill="x", side="top")
@@ -1466,9 +1601,10 @@ class App(tk.Tk):
         head = tk.Frame(card, bg=CARD)
         head.pack(fill="x", padx=14, pady=(11, 6))
         tk.Frame(head, bg=ACCENT, width=3, height=14).pack(side="left", padx=(0, 8))
-        tk.Label(head, text=title, bg=CARD, fg=TEXT, font=(FONT_FAMILY, 11, "bold")).pack(
-            side="left"
-        )
+        title_label = tk.Label(head, text=title, bg=CARD, fg=TEXT, font=(FONT_FAMILY, 11, "bold"))
+        title_label.pack(side="left")
+        if title_key and registry is not None:
+            registry.append((title_label, title_key))
         if subtitle:
             tk.Label(head, text=subtitle, bg=CARD, fg=MUTED, font=(FONT_FAMILY, 9)).pack(
                 side="right"
@@ -1587,7 +1723,9 @@ class App(tk.Tk):
     # -- 左栏：设备 ---------------------------------------------------- #
     def _build_device_panel(self, parent: tk.Frame) -> None:
         parent.grid_columnconfigure(0, weight=1)
-        card, body = self._card(parent, "设备")
+        card, body = self._card(
+            parent, _t("card.device"), title_key="card.device", registry=self._i18n_widgets
+        )
         card.grid(row=1, column=0, sticky="ew", pady=(10, 0))
 
         self._conn_label = tk.Label(
@@ -1599,8 +1737,27 @@ class App(tk.Tk):
         self._dev_iface_label = self._label(body, "接口：尚未检测", size=9, color=MUTED, wrap=224)
         self._dev_iface_label.pack(fill="x", pady=(2, 8))
 
+        # 多屏：两块以上时才显示（单屏整行 pack_forget，界面与以前完全一致）。
+        self._panel_row = tk.Frame(body, bg=CARD)
+        self._panel_row.pack(fill="x", pady=(0, 6))
+        panel_row = self._panel_row
+        self._label(panel_row, "目标屏幕", size=9, color=MUTED).grid(row=0, column=0, sticky="w")
+        self._panel_var = tk.StringVar(value="")
+        self._panel_combo = ttk.Combobox(
+            panel_row, textvariable=self._panel_var, values=(), width=16, state="readonly"
+        )
+        self._panel_combo.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        self._panel_combo.bind("<<ComboboxSelected>>", self._on_panel_selected)
+        panel_row.grid_columnconfigure(1, weight=1)
+        self._panel_hint = self._label(body, "", size=8, color=MUTED, wrap=224)
+        self._panel_hint.pack(fill="x")
+        # 只有一块屏时整行（标签 + 下拉）都不该出现；pack_forget 后再 pack 要指定
+        # before，否则会跑到设备卡末尾去。
+        self._panel_row.pack_forget()
+
         detect_row = tk.Frame(body, bg=CARD)
         detect_row.pack(fill="x")
+        self._detect_row = detect_row
         ttk.Button(
             detect_row, text="检测设备", style="Small.TButton", command=self._on_detect
         ).pack(side="left")
@@ -1719,7 +1876,13 @@ class App(tk.Tk):
 
     # -- 左栏：实时指标 ------------------------------------------------ #
     def _build_metrics_panel(self, parent: tk.Frame) -> None:
-        card, body = self._card(parent, "实时指标", "常驻")
+        card, body = self._card(
+            parent,
+            _t("card.metrics"),
+            "常驻",
+            title_key="card.metrics",
+            registry=self._i18n_widgets,
+        )
         card.grid(row=0, column=0, sticky="ew")
         self._metrics_card = card
 
@@ -1914,7 +2077,13 @@ class App(tk.Tk):
     def _build_preview_panel(self, parent: tk.Frame) -> None:
         parent.grid_rowconfigure(0, weight=1)
         parent.grid_columnconfigure(0, weight=1)
-        card, body = self._card(parent, "实时预览", f"{SCREEN_SIZE} × {SCREEN_SIZE}")
+        card, body = self._card(
+            parent,
+            _t("card.preview"),
+            f"{SCREEN_SIZE} × {SCREEN_SIZE}",
+            title_key="card.preview",
+            registry=self._i18n_widgets,
+        )
         card.grid(row=0, column=0, sticky="nsew")
         body.grid_rowconfigure(0, weight=1)
         body.grid_columnconfigure(0, weight=1)
@@ -1963,7 +2132,9 @@ class App(tk.Tk):
     def _build_editor_panel(self, parent: tk.Frame) -> None:
         parent.grid_rowconfigure(0, weight=1)
         parent.grid_columnconfigure(0, weight=1)
-        card, body = self._card(parent, "内容与编辑")
+        card, body = self._card(
+            parent, _t("card.editor"), title_key="card.editor", registry=self._i18n_widgets
+        )
         card.grid(row=0, column=0, sticky="nsew")
 
         notebook = ttk.Notebook(body)
@@ -2247,7 +2418,7 @@ class App(tk.Tk):
         inner = tk.Frame(bar, bg=CARD)
         inner.pack(fill="x", padx=14, pady=10)
 
-        self._label(inner, "推流帧率", size=9, color=MUTED, bg=CARD).pack(side="left")
+        self._label(inner, _t("bottom.fps"), size=9, color=MUTED, bg=CARD).pack(side="left")
         self._fps_var = tk.StringVar(value="30")
         self._fps_combo = ttk.Combobox(
             inner,
@@ -2259,14 +2430,26 @@ class App(tk.Tk):
         self._fps_combo.pack(side="left", padx=(6, 14))
 
         self._btn_start = ttk.Button(
-            inner, text="▶  开始推送到屏幕", style="Accent.TButton", command=self._on_start_stream
+            inner,
+            text=_t("bottom.stream_start"),
+            style="Accent.TButton",
+            command=self._on_start_stream,
         )
         self._btn_start.pack(side="left")
         self._btn_stop = ttk.Button(
-            inner, text="⏹  停止", style="Ghost.TButton", command=self._on_stop_stream
+            inner,
+            text=_t("bottom.stream_stop"),
+            style="Ghost.TButton",
+            command=self._on_stop_stream,
         )
         self._btn_stop.pack(side="left", padx=(8, 14))
         self._btn_stop.state(["disabled"])
+        self._i18n_widgets.extend(
+            [
+                (self._btn_start, "bottom.stream_start"),
+                (self._btn_stop, "bottom.stream_stop"),
+            ]
+        )
 
         self._frames_label = self._label(inner, "已推 0 帧 · 0.0 fps", size=9, color=MUTED, bg=CARD)
         self._frames_label.pack(side="right")
@@ -3532,6 +3715,97 @@ class App(tk.Tk):
         self._set_status(f"已导入 {copied} 个官方素材到 {library}", "ok" if copied else "warn")
 
     # -- 图层插件 -------------------------------------------------------- #
+    def _plugin_audit(self, name: str) -> tuple[str, tuple[str, ...]]:
+        """静态审计一个插件：返回（中文摘要, 未声明的越界权限元组）。
+
+        插件沙箱模块不可用时返回空摘要与空元组，界面据此跳过提示。
+        """
+        if pluginsandbox_mod is None or plugins_mod is None:
+            return "", ()
+        try:
+            spec = plugins_mod.registry().get(name)
+        except Exception as exc:
+            _warn_once(f"读取插件声明失败：{exc}")
+            return "", ()
+        if spec is None:
+            return "", ()
+        source = str(getattr(spec, "source", "") or "")
+        if not source:
+            return "", ()
+        try:
+            findings = pluginsandbox_mod.audit_file(source)
+        except OSError as exc:
+            _warn_once(f"插件 {name} 源码不可读：{exc}")
+            return "", ()
+        declared = pluginsandbox_mod.declared_permissions(spec)
+        try:
+            summary = pluginsandbox_mod.summarize(declared, findings)
+            missing = pluginsandbox_mod.undeclared_permissions(declared, findings)
+        except Exception as exc:
+            _warn_once(f"插件 {name} 权限审计失败：{exc}")
+            return "", ()
+        return summary, tuple(missing)
+
+    def _on_audit_plugins(self) -> None:
+        """弹窗列出全部插件的权限声明与静态审计结论。"""
+        if plugins_mod is None or pluginsandbox_mod is None:
+            self._set_status("插件审计不可用：插件模块或沙箱模块缺失", "warn")
+            return
+        try:
+            specs = dict(plugins_mod.registry().specs)
+        except Exception as exc:
+            self._set_status(f"读取插件列表失败：{exc}", "error")
+            return
+        if not specs:
+            self._set_status(f"插件目录里还没有插件（{plugins_mod.plugin_dir()}）", "warn")
+            return
+        lines: list[str] = []
+        for name, spec in sorted(specs.items()):
+            summary, missing = self._plugin_audit(name)
+            label = str(getattr(spec, "label", name) or name)
+            lines.append(f"【{label}】{name}")
+            lines.append(
+                f"  声明权限：{'、'.join(_PERMISSION_LABELS.get(p, p) for p in (getattr(spec, 'permissions', ()) or ())) or '无'}"
+            )
+            lines.append(f"  静态审计：{summary or '该项不可用'}")
+            if missing:
+                lines.append(
+                    f"  越界调用：{'、'.join(_PERMISSION_LABELS.get(p, p) for p in missing)}（未在 PLUGIN 里声明）"
+                )
+            lines.append("")
+        window = tk.Toplevel(self)
+        window.title("插件权限审计")
+        window.configure(bg=BG)
+        window.geometry("620x420")
+        self._label(
+            window,
+            "插件是普通 Python 代码，下面的权限结论来自静态解析源码，仅供参考；"
+            "「越界调用」表示代码用到了插件没有声明的能力。",
+            size=9,
+            color=MUTED,
+            wrap=580,
+            bg=BG,
+        ).pack(fill="x", padx=14, pady=(12, 6))
+        body = tk.Text(
+            window,
+            bg=CARD_2,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            wrap="word",
+            font=(FONT_FAMILY, 9),
+            padx=10,
+            pady=8,
+        )
+        body.pack(fill="both", expand=True, padx=14, pady=(0, 10))
+        body.insert("1.0", "\n".join(lines).strip())
+        body.configure(state="disabled")
+        ttk.Button(window, text="关闭", style="Ghost.TButton", command=window.destroy).pack(
+            anchor="e", padx=14, pady=(0, 12)
+        )
+        self._plugin_audit_window = window
+        self._set_status(f"已审计 {len(specs)} 个插件", "ok")
+
     def _load_plugins(self) -> None:
         """启动时静默扫描插件目录并生成按钮。"""
         if plugins_mod is None:
@@ -3554,6 +3828,7 @@ class App(tk.Tk):
             return
         self._refresh_plugin_buttons()
         self._set_status(f"已加载 {count} 个图层插件（目录：{plugins_mod.plugin_dir()}）", "ok")
+        _record_event("plugins_reloaded", count=count)
 
     def _refresh_plugin_buttons(self) -> None:
         if self._plugin_row is None:
@@ -3677,10 +3952,33 @@ class App(tk.Tk):
         holder = tk.Frame(frame, bg=BG)
         holder.pack(fill="both", expand=True)
         listing = self._dark_listbox(holder, height=10)
-        listing.configure(width=52)
+        listing.configure(width=44)
         listing.pack(side="left", fill="both", expand=True)
         scrollbar = self._attach_scrollbar(listing, holder)
         scrollbar.pack(side="right", fill="y")
+
+        # 缩略图：选中一条后异步下载（失败就留占位），不阻塞列表操作。
+        thumb_box = tk.Frame(frame, bg=CARD_2, width=132, height=132)
+        thumb_box.pack(side="right", anchor="n", padx=(10, 0))
+        thumb_box.pack_propagate(False)
+        thumb_label = tk.Label(thumb_box, text="缩略图", bg=CARD_2, fg=MUTED, font=(FONT_FAMILY, 8))
+        thumb_label.pack(fill="both", expand=True)
+
+        sort_row = tk.Frame(frame, bg=BG)
+        sort_row.pack(fill="x", pady=(8, 0))
+        self._label(sort_row, "排序", size=8, color=MUTED).pack(side="left")
+        sort_var = tk.StringVar(value="评分")
+        sort_choices = {"评分": "rating", "下载量": "downloads", "名称": "name"}
+        sort_box = ttk.Combobox(
+            sort_row,
+            textvariable=sort_var,
+            values=list(sort_choices),
+            width=8,
+            state="readonly",
+        )
+        sort_box.pack(side="left", padx=(6, 0))
+        self._preset_sort_box = sort_box
+        self._preset_sort_var = sort_var
 
         detail = self._label(frame, "选择一条预设查看说明。", size=8, color=MUTED, wrap=420)
         detail.pack(anchor="w", pady=(8, 0))
@@ -3691,16 +3989,45 @@ class App(tk.Tk):
         status.pack(side="left")
 
         entries: list[dict] = []
-        state: dict[str, Any] = {"busy": False}
+        state: dict[str, Any] = {"busy": False, "thumb_token": 0, "photo": None}
         results: queue.Queue = queue.Queue()
+        thumb_results: queue.Queue = queue.Queue()
+        # 给无人值守 GUI 自检留的句柄：排序框、缩略图标签、当前条目。
+        self._preset_entries = entries
+        self._preset_thumb_label = thumb_label
+
+        def _fill_listing() -> None:
+            """按当前排序键重排列表，保留选中项的 name。"""
+            key = sort_choices.get(sort_var.get(), "rating")
+            selected = ""
+            selection = listing.curselection()
+            if selection and selection[0] < len(entries):
+                selected = str(entries[selection[0]].get("name") or "")
+            ordering = entries
+            sorter = getattr(presetslib_mod, "sort_entries", None)
+            if callable(sorter):
+                try:
+                    ordering = list(sorter(entries, key))
+                except Exception as exc:
+                    _warn_once(f"预设排序失败：{exc}")
+                    ordering = entries
+            entries.clear()
+            listing.delete(0, "end")
+            for item in ordering:
+                entries.append(item)
+                listing.insert("end", _preset_list_line(item))
+            if selected:
+                for index, item in enumerate(entries):
+                    if str(item.get("name") or "") == selected:
+                        listing.selection_set(index)
+                        listing.see(index)
+                        break
 
         def apply(items: list, online: bool) -> None:
             state["busy"] = False
             entries.clear()
-            listing.delete(0, "end")
-            for item in items:
-                entries.append(item)
-                listing.insert("end", str(item.get("name") or "未命名预设"))
+            entries.extend(items)
+            _fill_listing()
             if not entries:
                 reason = presetslib_mod.last_error() or "索引里没有可安装的预设"
                 status.configure(text=f"未获取到预设：{reason}", fg=WARN)
@@ -3732,21 +4059,74 @@ class App(tk.Tk):
             threading.Thread(target=work, name="preset-library", daemon=True).start()
             dialog.after(120, poll)
 
+        def show_thumbnail(entry: dict) -> None:
+            """异步取缩略图；用 token 丢弃上一次选择迟到的结果。"""
+            state["thumb_token"] = int(state["thumb_token"]) + 1
+            token = state["thumb_token"]
+            thumb_label.configure(image="", text="缩略图", fg=MUTED)
+            state["photo"] = None
+            fetcher = getattr(presetslib_mod, "download_thumbnail", None)
+            if not callable(fetcher) or not entry.get("thumbnail"):
+                return
+            payload = dict(entry)
+
+            def work() -> None:
+                try:
+                    path = fetcher(payload)
+                except Exception as exc:
+                    thumb_results.put((token, str(exc)))
+                    return
+                thumb_results.put((token, str(path) if path else ""))
+
+            threading.Thread(target=work, name="preset-thumb", daemon=True).start()
+            state["thumb_pending"] = 80
+            dialog.after(120, poll_thumbnail)
+
+        def poll_thumbnail() -> None:
+            try:
+                token, result = thumb_results.get_nowait()
+            except queue.Empty:
+                # 最多等 ~10 秒；超时就当没有缩略图，不让轮询无限跑。
+                remaining = int(state.get("thumb_pending", 0)) - 1
+                state["thumb_pending"] = remaining
+                if remaining > 0:
+                    dialog.after(120, poll_thumbnail)
+                return
+            if token != state["thumb_token"]:
+                return
+            if not result:
+                thumb_label.configure(text="无缩略图", fg=MUTED)
+                return
+            try:
+                image = Image.open(result)
+                image.load()
+                image.thumbnail((128, 128))
+            except Exception as exc:
+                thumb_label.configure(text="缩略图读取失败", fg=WARN)
+                _warn_once(f"缩略图读取失败：{exc}")
+                return
+            try:
+                photo = ImageTk.PhotoImage(image)
+            except Exception as exc:
+                _warn_once(f"缩略图显示失败：{exc}")
+                return
+            state["photo"] = photo
+            thumb_label.configure(image=photo, text="")
+
         def on_select(_event: tk.Event | None = None) -> None:
             selection = listing.curselection()
             if not selection or selection[0] >= len(entries):
                 return
             entry = entries[selection[0]]
-            parts = [str(entry.get("name") or "未命名预设")]
-            if entry.get("author"):
-                parts.append(f"作者 {entry['author']}")
-            if entry.get("version"):
-                parts.append(f"v{entry['version']}")
-            if entry.get("tags"):
-                parts.append("标签 " + "、".join(str(tag) for tag in entry["tags"]))
-            if entry.get("description"):
-                parts.append(str(entry["description"]))
-            detail.configure(text=" · ".join(parts[:4]))
+            describe = getattr(presetslib_mod, "describe_entry", None)
+            if callable(describe):
+                try:
+                    detail.configure(text=str(describe(entry)))
+                except Exception:
+                    detail.configure(text=_preset_list_line(entry))
+            else:
+                detail.configure(text=_preset_list_line(entry))
+            show_thumbnail(entry)
 
         def install() -> None:
             selection = listing.curselection()
@@ -3779,6 +4159,7 @@ class App(tk.Tk):
             side="right", padx=(0, 8)
         )
         listing.bind("<<ListboxSelect>>", on_select)
+        sort_box.bind("<<ComboboxSelected>>", lambda _event: _fill_listing())
         dialog.protocol("WM_DELETE_WINDOW", on_close)
 
         dialog.update_idletasks()
@@ -4799,13 +5180,15 @@ class App(tk.Tk):
                 _warn_once(f"读取插件隔离状态失败：{exc}")
 
         permissions = getattr(spec, "permissions", ()) or ()
-        if permissions:
-            self._grid_label(grid, row, "插件声明")
+        summary, missing = self._plugin_audit(spec.name)
+        if permissions or missing:
+            self._grid_label(grid, row, "插件权限")
             hint = self._label(
                 grid,
-                f"需要{'、'.join(_PERMISSION_LABELS.get(p, p) for p in permissions)}（仅供参考，不做强制）",
+                f"声明：{'、'.join(_PERMISSION_LABELS.get(p, p) for p in permissions) or '无'}"
+                f"；{summary}",
                 size=8,
-                color=MUTED,
+                color=WARN if missing else MUTED,
                 wrap=220,
             )
             hint.grid(row=row, column=1, sticky="ew", pady=2)
@@ -4975,6 +5358,8 @@ class App(tk.Tk):
                 dot.configure(fg=color)
             except tk.TclError:
                 pass
+        # 连接状态变了也要保留「第 N/M 块屏」后缀，否则多屏时会被覆盖掉。
+        self._update_panel_chip()
 
     def _on_detect(self) -> None:
         self._detect_device(auto=False)
@@ -4995,8 +5380,140 @@ class App(tk.Tk):
                 self._post("devices_error", friendly_device_error(exc))
                 return
             self._post("devices", devices)
+            panels = _enumerate_panels_safe()
+            self._post("panels", panels)
+            _record_event("devices_enumerated", devices=len(devices), panels=len(panels))
 
         threading.Thread(target=job, daemon=True, name="hud-enum").start()
+
+    def _apply_panels(self, panels: Any) -> None:
+        """接收枚举到的面板列表，保留仍然存在的选中项。"""
+        if not isinstance(panels, list):
+            panels = []
+        self._panels = panels
+        ids = {str(getattr(panel, "panel_id", "")) for panel in panels}
+        if self._selected_panel_id not in ids:
+            self._selected_panel_id = str(getattr(panels[0], "panel_id", "")) if panels else ""
+        self._refresh_panel_choices()
+        self._update_panel_chip()
+
+    def _update_panel_chip(self) -> None:
+        """顶栏的设备 chip 在多屏时补上「第 N/M 块」，单屏时只留连接状态。"""
+        chip = getattr(self, "_chip_device", None)
+        if chip is None:
+            return
+        try:
+            current = str(chip.cget("text"))
+        except tk.TclError:
+            return
+        base = current.split(" · ")[0] if " 块屏" in current else current
+        count = len(self._panels)
+        if count < 2:
+            try:
+                chip.configure(text=base)
+            except tk.TclError:
+                pass
+            return
+        index = 0
+        for position, panel in enumerate(self._panels, start=1):
+            if str(getattr(panel, "panel_id", "")) == self._selected_panel_id:
+                index = position
+                break
+        try:
+            chip.configure(text=f"{base} · {index or 1}/{count} 块屏")
+        except tk.TclError:
+            pass
+
+    def _selected_panel(self) -> Any | None:
+        """返回当前选中的面板对象；没有选中或列表为空时返回 None。"""
+        for panel in self._panels:
+            if getattr(panel, "panel_id", "") == self._selected_panel_id:
+                return panel
+        return self._panels[0] if self._panels else None
+
+    def _panel_target(self) -> Any | None:
+        """传给 device.Screen / device.Control 的面板参数。
+
+        只有一块屏时返回 None，让设备层走原来的「取第一台」路径 —— 单屏用户
+        的行为与加入多屏支持之前完全一致。
+        """
+        if len(self._panels) < 2:
+            return None
+        return self._selected_panel()
+
+    def _refresh_panel_choices(self) -> None:
+        """把枚举到的面板填进设备卡的下拉框（少于两块时整行隐藏）。"""
+        combo = self._panel_combo
+        if combo is None:
+            return
+        labels = [str(getattr(panel, "label", "")) for panel in self._panels]
+        multiple = len(self._panels) > 1
+        panel_var = self._panel_var
+        if panel_var is not None:
+            selected = self._selected_panel()
+            if selected is not None:
+                panel_var.set(str(getattr(selected, "label", "")))
+            elif labels:
+                panel_var.set(labels[0])
+            else:
+                panel_var.set("")
+        try:
+            combo.configure(values=labels)
+        except tk.TclError:
+            return
+        # 单屏时整行（标签 + 下拉）都不显示，避免留一个空白的「目标屏幕」。
+        row = self._panel_row
+        if row is not None:
+            try:
+                if multiple:
+                    anchor = getattr(self, "_detect_row", None)
+                    if anchor is not None and not row.winfo_manager():
+                        row.pack(fill="x", pady=(0, 6), before=anchor)
+                    elif not row.winfo_manager():
+                        row.pack(fill="x", pady=(0, 6))
+                elif row.winfo_manager():
+                    row.pack_forget()
+            except tk.TclError:
+                pass
+        hint = self._panel_hint
+        if hint is not None:
+            try:
+                hint.configure(
+                    text=(
+                        f"发现 {len(self._panels)} 块屏：推流与背光只作用在选中的这一块"
+                        if multiple
+                        else ""
+                    )
+                )
+            except tk.TclError:
+                pass
+
+    def _on_panel_selected(self, _event: tk.Event | None = None) -> None:
+        """切换目标面板：断开已打开的控制口，下一次命令/推流按新的面板打开。"""
+        panel_var = self._panel_var
+        if panel_var is None:
+            return
+        label = str(panel_var.get())
+        chosen = None
+        for panel in self._panels:
+            if str(getattr(panel, "label", "")) == label:
+                chosen = panel
+                break
+        if chosen is None:
+            return
+        new_id = str(getattr(chosen, "panel_id", ""))
+        if new_id == self._selected_panel_id:
+            return
+        was_streaming = self._is_streaming()
+        if was_streaming:
+            self._on_stop_stream()
+        with self._ctl_lock:
+            self._close_control_locked()
+        self._selected_panel_id = new_id
+        self._update_panel_chip()
+        self._set_status(f"目标面板已切换为「{label}」", "info")
+        if was_streaming:
+            self._set_status(f"目标面板已切换为「{label}」，请重新点开始推送", "warn")
 
     def _apply_devices(self, devices: Any) -> None:
         if not isinstance(devices, list):
@@ -5058,7 +5575,7 @@ class App(tk.Tk):
         if device_mod is None:
             raise RuntimeError("设备模块 device.py 未就绪")
         if self._control is None:
-            control = device_mod.Control()
+            control = device_mod.Control(self._panel_target())
             control.open()
             self._control = control
 
@@ -5280,8 +5797,10 @@ class App(tk.Tk):
                 pass
         if error:
             self._set_status(f"写入待机图失败：{error}", "error")
+            _record_event("flash_write_failed", level="error", kind=kind, error=error)
         else:
             self._set_status(f"已写入{kind}待机图（{size:,} 字节）· 关屏再开屏即可看到", "ok")
+            _record_event("flash_write_done", kind=kind, bytes=size)
 
     # ------------------------------------------------------------------ #
     # 推流
@@ -5330,6 +5849,9 @@ class App(tk.Tk):
         self._stream_frames = 0
         self._stream_started_at = time.monotonic()
         self._stream_stop.clear()
+        # 在 UI 线程锁定这次推流的目标面板，后台线程只读这个值，
+        # 避免推流途中用户切换下拉框导致半途换屏。
+        self._stream_panel = self._panel_target()
         self._stream_thread = threading.Thread(
             target=self._stream_loop, daemon=True, name="hud-stream"
         )
@@ -5337,6 +5859,11 @@ class App(tk.Tk):
         self._update_stream_buttons(True)
         self._set_connection("● 正在连接屏幕…", WARN)
         self._set_status("正在打开屏幕（推流线程）…", "info")
+        _record_event(
+            "stream_started",
+            fps=self._stream_fps,
+            panel=str(getattr(self._stream_panel, "panel_id", "") or ""),
+        )
 
     def _on_stop_stream(self) -> None:
         if not self._is_streaming():
@@ -5388,7 +5915,7 @@ class App(tk.Tk):
         try:
             fps = self._stream_fps
             self._post("stream_msg", "正在打开图像接口（MI_01）…", "info")
-            screen = device_mod.Screen()
+            screen = device_mod.Screen(self._stream_panel)
             screen.open()
             self._post("stream_state", "streaming")
             timeline = time.monotonic()
@@ -5472,6 +5999,8 @@ class App(tk.Tk):
             self._set_status(str(payload[0]), str(payload[1]) if len(payload) > 1 else "info")
         elif kind == "devices":
             self._apply_devices(payload[0])
+        elif kind == "panels":
+            self._apply_panels(payload[0])
         elif kind == "devices_error":
             self._set_status(str(payload[0]), "error")
         elif kind == "stream_msg":
@@ -5494,12 +6023,14 @@ class App(tk.Tk):
                     self._set_status(str(error), "error")
                     if self._device_hint is not None:
                         self._device_hint.configure(text=str(error))
+                    _record_event("stream_failed", level="error", frames=frames, error=str(error))
                 else:
                     ready = bool(self._detected)
                     self._set_connection(
                         "● 设备就绪（未连接）" if ready else "● 未连接", ACCENT if ready else MUTED
                     )
                     self._set_status(f"已停止推送（共 {frames} 帧），屏幕约 10 秒后熄灭", "info")
+                    _record_event("stream_stopped", frames=frames)
                 self._frames_label.configure(text=f"已推 {frames} 帧 · 已停止")
         elif kind == "stream_stats":
             frames = int(payload[0])
@@ -5711,6 +6242,10 @@ class App(tk.Tk):
         project = data.get("project")
         if isinstance(project, str) and project and os.path.isfile(project):
             self.load_project(project, notify=False)
+        panel_id = data.get("panel_id")
+        if isinstance(panel_id, str) and panel_id:
+            self._selected_panel_id = panel_id
+            self._refresh_panel_choices()
         self._set_status("已恢复上次界面状态", "info")
 
     def _save_state(self) -> None:
@@ -5736,6 +6271,8 @@ class App(tk.Tk):
                 data["playlist_interval"] = float(self._playlist.interval)
             except (AttributeError, TypeError, ValueError):
                 pass
+        if self._selected_panel_id:
+            data["panel_id"] = self._selected_panel_id
         data["last_used"] = int(time.time())
         try:
             settings_mod.save(data)
@@ -6143,6 +6680,80 @@ class App(tk.Tk):
             _reveal_folder(folder)
         except Exception as exc:
             self._set_status(f"打开日志目录失败：{exc}（路径：{folder}）", "warn")
+
+    def _open_event_log(self) -> None:
+        """打开结构化事件日志（events.jsonl），不存在时说明还没有记录。"""
+        if diagnostics_mod is None or not hasattr(diagnostics_mod, "event_log_path"):
+            self._set_status("事件日志不可用：diagnostics 模块太旧", "warn")
+            return
+        try:
+            path = str(diagnostics_mod.event_log_path())
+        except Exception as exc:
+            self._set_status(f"找不到事件日志：{exc}", "warn")
+            return
+        if not os.path.isfile(path):
+            self._set_status(f"还没有事件记录（写入第一个事件后会创建：{path}）", "warn")
+            return
+        try:
+            _reveal_folder(os.path.dirname(path))
+        except Exception as exc:
+            self._set_status(f"打开事件日志失败：{exc}（路径：{path}）", "warn")
+            return
+        self._set_status(f"事件日志：{path}", "ok")
+
+    def _on_set_language(self, code: str) -> None:
+        """切换界面语言：写设置并就地重译已登记的主要文案。"""
+        if i18n_mod is None:
+            return
+        try:
+            applied = i18n_mod.set_language(code)
+        except Exception as exc:
+            self._set_status(f"切换语言失败：{exc}", "error")
+            return
+        if self._language_var is not None:
+            try:
+                self._language_var.set(applied)
+            except tk.TclError:
+                pass
+        if settings_mod is not None:
+            try:
+                settings_mod.set("language", applied)
+            except Exception as exc:
+                _warn_once(f"保存语言设置失败：{exc}")
+        self._retranslate()
+        self._set_status(f"界面语言已切换为 {_language_label(applied)}", "ok")
+        _record_event("language_changed", level="info", language=applied)
+
+    def _retranslate(self) -> None:
+        """按当前语言刷新已登记的控件文案（卡片标题、图标栏、底栏按钮）。"""
+        for widget, key in list(self._i18n_widgets):
+            try:
+                widget.configure(text=_t(key))
+            except tk.TclError:
+                continue
+        if self._panel_hint is not None and len(self._panels) > 1:
+            try:
+                self._panel_hint.configure(
+                    text=f"发现 {len(self._panels)} 块屏：推流与背光只作用在选中的这一块"
+                )
+            except tk.TclError:
+                pass
+
+    def _load_language(self) -> None:
+        """启动时按设置恢复上次选择的界面语言。"""
+        if i18n_mod is None or settings_mod is None:
+            return
+        try:
+            stored = settings_mod.get("language")
+        except Exception as exc:
+            _warn_once(f"读取语言设置失败：{exc}")
+            return
+        if not isinstance(stored, str) or not stored:
+            return
+        try:
+            i18n_mod.set_language(stored)
+        except Exception as exc:
+            _warn_once(f"应用语言设置失败：{exc}")
 
 
 def _reveal_folder(folder: str) -> None:
