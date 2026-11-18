@@ -83,6 +83,10 @@ FLASH_MAX_BYTES = 0x980000  # 9.96 MB, the vendor's own size clamp
 FLASH_TARGET_STARTUP = 1  # 0x0A flag dword written by the startup-image path
 FLASH_TARGET_STANDBY = 0  # 0x0A flag dword written by the standby-image path
 FLASH_HEADER_LEN = 12  # per-block header: offset, length, pad, progress, padding
+#: The vendor stores the standby image as a plain JPEG, so its 38 KB file is far
+#: below the flash ceiling; a 480x480 photo at quality 92 stays in the tens of KB.
+#: One megabyte leaves room for a very detailed picture without a slow upload.
+FLASH_IMAGE_MAX_BYTES = 1024 * 1024
 
 
 # --------------------------------------------------------------------------- #
@@ -661,6 +665,37 @@ def encode_jpeg(img: Image.Image, max_bytes: int = MAX_FRAME_BYTES, rotate: int 
     raise ValueError(
         f"cannot fit the frame into {max_bytes} bytes even at quality 5; use a simpler picture"
     )
+
+
+def encode_flash_image(img: Image.Image, max_bytes: int = FLASH_IMAGE_MAX_BYTES) -> bytes:
+    """Encode a standby/boot picture as the plain JPEG the vendor writes to flash.
+
+    Streamed frames go through `encode_jpeg`, which is capped at the panel's
+    46920-byte frame budget; a flash asset has no such cap, so this encoder keeps
+    quality high and only steps down when the result would exceed `max_bytes`.
+
+    Raises `ValueError` when even the lowest quality overflows.
+    """
+    ladder = (95, 92, 90, 85, 80, 75, 70, 60, 50, 40, 30, 20)
+    for quality in ladder:
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality, optimize=True, subsampling=2)
+        data = buf.getvalue()
+        if len(data) <= max_bytes:
+            return data
+    raise ValueError(
+        f"cannot fit the picture into {max_bytes} bytes even at quality 20; pick a simpler picture"
+    )
+
+
+def prepare_flash_image(source: str | Path | Image.Image, size: int = SCREEN_W) -> bytes:
+    """Centre-crop any picture to the panel square and encode it for flash."""
+    if isinstance(source, Image.Image):
+        img = source
+    else:
+        img = Image.open(source)
+        img.load()
+    return encode_flash_image(fit_square(img, size))
 
 
 def _pack_u32(value: int) -> bytes:

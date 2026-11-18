@@ -88,7 +88,7 @@ offset 5   1020B payload        raw JPEG bytes; pad the last packet with 0x00
 | `0x12` | 0–100 | brightness |
 | `0x10` | 0=on, 1=off | panel power |
 | `0x11` | 0–3 | rotation setting (stored only — **does not** rotate the stream; rotate pixels in Pillow) |
-| `0x0A`/`0x0B` | target u32 + size u32, then 12-byte block headers | flash upload (startup/standby image) — implemented as `Control.upload_file()`, **not yet verified on hardware**; see `docs/PROTOCOL.md` §3.1 |
+| `0x0A`/`0x0B` | target u32 + size u32, then 12-byte block headers | flash upload — **standby image (target 0) verified on hardware with a plain JPEG**; startup image (target 1) is a vendor `.pak` container, format unknown. See `docs/PROTOCOL.md` §3.1 |
 | `0x18`/`0x1A`/`0x1E` | — | temperature display / content type / loop — **untested** |
 
 ## 4. Recipe: port HydroHUD to another USB screen
@@ -137,7 +137,7 @@ Then in `hydrohud/render.py`: write `_draw_thermometer_layer(draw, layer, values
 ## 6. Commands
 
 ```powershell
-C:\Python314\python.exe -m pytest tests -q          # 982 tests, all pure-software
+C:\Python314\python.exe -m pytest tests -q          # 987 tests, all pure-software
 C:\Python314\python.exe -m black --line-length 100 hydrohud tests tools
 C:\Python314\python.exe -m ruff check hydrohud tests tools       # pyproject.toml holds the shared config
 C:\Python314\python.exe -m hydrohud                 # run from source
@@ -146,7 +146,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1 -Clean   # → dist\HydroHUD.
 C:\Python314\python.exe tools\check_device.py       # real hardware self-check
 C:\Python314\python.exe tools\verify_v11.py         # real-device fps regression (v1.1 scene)
 C:\Python314\python.exe -X utf8 tools\verify_v13.py  # real-device v1.3 scene: static + capture rounds
-C:\Python314\python.exe -X utf8 tools\gui_check.py  # headless GUI integration sweep (45 checks)
+C:\Python314\python.exe -X utf8 tools\gui_check.py  # headless GUI integration sweep (46 checks)
 C:\Python314\python.exe -X utf8 tools\render_previews.py    # regenerate preview/ + contact sheet
 C:\Python314\python.exe -X utf8 -m hydrohud.hudctl status   # CLI client for the local API (GUI must be running)
 C:\Python314\python.exe -X utf8 tools\build_docs.py --strict  # → build\docs-site\docs (site source tree)

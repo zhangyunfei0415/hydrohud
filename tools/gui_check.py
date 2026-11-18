@@ -118,6 +118,9 @@ def main(argv: list[str] | None = None) -> int:
     # 11) 推流按钮只保留底栏一份，左侧图标栏不再重复
     check("推流按钮不重复", lambda: _check_rail_has_no_stream_buttons(root_app))
 
+    # 12) 待机图写入：编码 → 上传 → 进度 → 完成（全程桩设备，不碰真机）
+    check("待机图写入流程", lambda: _check_flash_standby_write(root_app))
+
     shot("final")
 
     root_app.on_close()  # 内含 shutdown + destroy，之后不能再操作窗口
@@ -361,6 +364,65 @@ def _check_rail_has_no_stream_buttons(app) -> None:
     assert app._btn_start is not None and app._btn_stop is not None, "底栏推流按钮缺失"
     assert "开始推送到屏幕" in str(app._btn_start.cget("text"))
     assert "停止" in str(app._btn_stop.cget("text"))
+
+
+def _check_flash_standby_write(app) -> None:
+    """待机图写入的完整路径：选图 → 确认 → 编码上传 → 进度 → 完成提示。
+
+    全程替换掉 `device.Control`（设备打开会真的占住 HID 接口），只用桩记录调用。
+    """
+    import tempfile
+    import time
+    from unittest import mock
+
+    from PIL import Image
+
+    from hydrohud import device
+
+    calls: dict[str, object] = {}
+
+    class StubControl:
+        def open(self) -> StubControl:
+            calls["opened"] = True
+            return self
+
+        def upload_file(self, data, target=0, progress=None) -> None:
+            calls["data"] = data
+            calls["target"] = target
+            if progress is not None:
+                progress(0.5)
+                progress(1.0)
+
+        def set_power(self, on: bool) -> None:
+            calls.setdefault("power", []).append(on)  # type: ignore[union-attr]
+
+        def close(self) -> None:
+            calls["closed"] = True
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "standby.png"
+        Image.new("RGB", (640, 480), (12, 34, 56)).save(path)
+        with (
+            mock.patch.object(device, "Control", StubControl),
+            mock.patch("tkinter.filedialog.askopenfilename", lambda *a, **k: str(path)),
+            mock.patch("tkinter.messagebox.askyesno", lambda *a, **k: True),
+        ):
+            app._on_write_standby_image()
+            for _ in range(300):
+                app.update()
+                if not app._flash_busy:
+                    break
+                time.sleep(0.01)
+            assert not app._flash_busy, "待机图写入没有结束"
+
+    assert calls.get("uploaded") is not None or calls.get("data"), "没有真正上传数据"
+    payload = calls["data"]
+    assert isinstance(payload, bytes) and payload[:2] == b"\xff\xd8", "上传的不是 JPEG"
+    assert len(payload) <= device.FLASH_IMAGE_MAX_BYTES
+    assert calls["target"] == device.FLASH_TARGET_STANDBY, "写错了 flash 槽位"
+    assert calls.get("closed") is True, "写完没有关掉控制口"
+    assert calls.get("power") == [False, True], "写完没有关屏再开屏"
+    assert "关屏再开屏" in _widget_text(app._rail.master), "界面没有提示需要关屏再开屏"
 
 
 def _token_text() -> None:

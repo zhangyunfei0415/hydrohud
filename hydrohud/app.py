@@ -317,6 +317,24 @@ def _device_name_line() -> str:
     return f"{spec.label} · {spec.vendor_id:04X}:{spec.product_id:04X}"
 
 
+def _vendor_standby_asset() -> str | None:
+    """官方软件自带的待机图：优先 led1 的 10002.jpg（480×480 裸 JPEG）。
+
+    官方把待机图存成 ``led_stby\\led_stby.jpg``，但安装目录里通常没有这个文件名，
+    只有 ``led1``/``led3`` 下同尺寸的 ``10002.jpg`` 素材；用它们写回 flash 与官方
+    待机图等价（都是 480×480 裸 JPEG）。
+    """
+    for relative in (
+        ("led1", "10002.jpg"),
+        ("led3", "10002.jpg"),
+        ("led_stby", "led_stby.jpg"),
+    ):
+        path = os.path.join(VENDOR_ASSET_DIR, *relative)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
 def _device_missing_line() -> str:
     """没检测到设备时的提示：把用户该做的事写清楚，并按平台给不同的排查方向。"""
     base = (
@@ -901,6 +919,11 @@ class App(tk.Tk):
         self._dev_iface_label: tk.Label | None = None
         self._device_name_label: tk.Label | None = None
         self._device_hint: tk.Label | None = None
+        self._flash_busy = False
+        self._btn_flash_standby: ttk.Button | None = None
+        self._btn_flash_restore: ttk.Button | None = None
+        self._flash_progress: ttk.Progressbar | None = None
+        self._flash_hint: tk.Label | None = None
         self._tips_card: tk.Frame | None = None
         self._tips_visible = True
         self._compact_mode = False
@@ -939,7 +962,7 @@ class App(tk.Tk):
         self.scene: dict = self._initial_scene()
 
         self.title("HydroHUD — Aurora 水冷屏控制台")
-        self.geometry("1268x860")
+        self.geometry("1268x880")
         self.minsize(1150, 720)
         self.configure(bg=BG)
         self.report_callback_exception = self._on_tk_callback_error
@@ -1134,6 +1157,15 @@ class App(tk.Tk):
         )
         style.configure("TSeparator", background=BORDER)
         style.configure(
+            "Flash.Horizontal.TProgressbar",
+            background=ACCENT_2,
+            troughcolor=CARD_2,
+            bordercolor=BORDER,
+            lightcolor=ACCENT_2,
+            darkcolor=ACCENT_2,
+            thickness=6,
+        )
+        style.configure(
             "Vertical.TScrollbar",
             background=BTN,
             troughcolor=CARD,
@@ -1194,6 +1226,12 @@ class App(tk.Tk):
         device_menu = tk.Menu(menubar, **menu_options)
         device_menu.add_command(label="检测设备（只枚举，不打开）", command=self._on_detect)
         device_menu.add_command(label="读取设备状态", command=self._on_query)
+        device_menu.add_separator()
+        device_menu.add_command(
+            label="写入待机图到屏内 flash…", command=self._on_write_standby_image
+        )
+        device_menu.add_command(label="恢复官方待机图", command=self._on_restore_vendor_standby)
+        device_menu.add_separator()
         device_menu.add_command(label="结束官方 TCOMAS 软件", command=self._on_kill_vendor)
         device_menu.add_separator()
         device_menu.add_command(label="开始推送到屏幕", command=self._on_start_stream)
@@ -1570,6 +1608,37 @@ class App(tk.Tk):
             side="left", padx=(6, 0)
         )
 
+        ttk.Separator(body, orient="horizontal").pack(fill="x", pady=6)
+
+        flash_row = tk.Frame(body, bg=CARD)
+        flash_row.pack(fill="x")
+        self._label(flash_row, "屏内图片", size=9, color=MUTED).pack(side="left")
+        self._btn_flash_standby = ttk.Button(
+            flash_row,
+            text="写入待机图…",
+            style="Small.TButton",
+            command=self._on_write_standby_image,
+        )
+        self._btn_flash_standby.pack(side="right")
+        self._btn_flash_restore = ttk.Button(
+            flash_row,
+            text="恢复官方…",
+            style="Ghost.TButton",
+            command=self._on_restore_vendor_standby,
+        )
+        self._btn_flash_restore.pack(side="right", padx=(0, 4))
+        self._flash_progress = ttk.Progressbar(
+            body, style="Flash.Horizontal.TProgressbar", maximum=100.0
+        )
+        self._flash_hint = self._label(
+            body,
+            "裸 JPEG 写 flash，开机动画暂不支持",
+            size=8,
+            color=MUTED,
+            wrap=224,
+        )
+        self._flash_hint.pack(fill="x", pady=(4, 0))
+
         ttk.Separator(body, orient="horizontal").pack(fill="x", pady=8)
 
         bright_head = tk.Frame(body, bg=CARD)
@@ -1623,7 +1692,7 @@ class App(tk.Tk):
         rotate_combo.bind("<<ComboboxSelected>>", self._on_rotation_selected)
 
         self._device_reply = self._label(body, "设备回复：—", size=8, color=MUTED, wrap=224)
-        self._device_reply.pack(fill="x", pady=(8, 0))
+        self._device_reply.pack(fill="x", pady=(6, 0))
 
         self._device_hint = self._label(
             body,
@@ -1677,12 +1746,12 @@ class App(tk.Tk):
             spark = tk.Canvas(
                 body,
                 bg=CARD_2,
-                height=34,
+                height=26,
                 highlightthickness=1,
                 highlightbackground=BORDER,
                 bd=0,
             )
-            spark.pack(fill="x", pady=(0, 6))
+            spark.pack(fill="x", pady=(0, 4))
             spark.bind("<Configure>", self._on_metric_bar_resize)
             self._metric_bars[metric] = (bar, value)
             self._metric_sparks[metric] = spark
@@ -5058,6 +5127,163 @@ class App(tk.Tk):
         threading.Thread(target=job, daemon=True, name="hud-query").start()
 
     # ------------------------------------------------------------------ #
+    # 屏内 flash：待机图
+    # ------------------------------------------------------------------ #
+    def _on_write_standby_image(self) -> None:
+        """选一张图写进屏内 flash 的待机图槽位。"""
+        if not self._flash_ready():
+            return
+        path = filedialog.askopenfilename(title="选择待机图", filetypes=IMG_FILETYPES, parent=self)
+        if not path:
+            return
+        if not messagebox.askyesno(
+            "写入待机图",
+            f"把这张图写进水冷屏的待机图槽位？\n\n"
+            f"{os.path.basename(path)}\n\n"
+            "· 会覆盖屏内原来的待机图（可随时点「恢复官方」写回官方素材）\n"
+            "· 图片会居中裁成 480×480，并重新编码成 JPEG\n"
+            "· 写完后关屏再开屏，新图才会显示出来",
+            parent=self,
+        ):
+            return
+        self._start_flash_write(path, vendor=False)
+
+    def _on_restore_vendor_standby(self) -> None:
+        """把官方软件自带的待机图写回 flash，撤销自定义画面。"""
+        if not self._flash_ready():
+            return
+        asset = _vendor_standby_asset()
+        if asset is None:
+            self._set_status(
+                f"没找到官方待机图素材（需要装过 TCOMAS 官方软件，目录：{VENDOR_ASSET_DIR}）",
+                "warn",
+            )
+            return
+        if not messagebox.askyesno(
+            "恢复官方待机图",
+            f"把官方待机图写回水冷屏？\n\n{os.path.basename(asset)}\n\n"
+            "写完后关屏再开屏即可看到官方画面。",
+            parent=self,
+        ):
+            return
+        self._start_flash_write(asset, vendor=True)
+
+    def _flash_ready(self) -> bool:
+        """写入前的公共检查：模块在、没有正在写、没有在推流。"""
+        if device_mod is None:
+            self._set_status("设备模块未就绪：无法写入屏内 flash", "warn")
+            return False
+        if self._flash_busy:
+            self._set_status("正在写入屏内 flash，等这次写完再试", "info")
+            return False
+        if self._is_streaming():
+            self._set_status("先停止推送再写屏内 flash（推送与 flash 写入别同时进行）", "warn")
+            return False
+        return True
+
+    def _start_flash_write(self, source: str, *, vendor: bool) -> None:
+        """后台线程里编码并上传待机图；进度经事件泵回 UI 线程。"""
+        self._flash_busy = True
+        self._set_flash_controls(enabled=False)
+        progress = getattr(self, "_flash_progress", None)
+        if progress is not None:
+            try:
+                progress.configure(value=0.0)
+                progress.pack(fill="x", pady=(6, 0))
+            except tk.TclError:
+                progress = None
+        if self._flash_hint is not None:
+            try:
+                self._flash_hint.configure(text="正在准备图片…", fg=ACCENT_2)
+            except tk.TclError:
+                pass
+        self._set_status(f"正在写入待机图：{os.path.basename(source)}", "info")
+
+        def job() -> None:
+            failure: Exception | None = None
+            size = 0
+            with self._ctl_lock:
+                try:
+                    payload = device_mod.prepare_flash_image(source)
+                    size = len(payload)
+                    self._open_control_locked()
+                    try:
+                        self._control.upload_file(
+                            payload,
+                            target=device_mod.FLASH_TARGET_STANDBY,
+                            progress=lambda fraction: self._post("flash_progress", fraction),
+                        )
+                        # 开关屏一次让固件重新读 flash；失败只影响「立刻看到」，
+                        # 写入本身已经成功，所以不把它当失败上报。
+                        try:
+                            self._control.set_power(False)
+                            time.sleep(1.2)
+                            self._control.set_power(True)
+                        except Exception as exc:  # noqa: BLE001 - 只丢掉开关屏这一步
+                            _warn_once(f"写待机图后开关屏失败（不影响写入）：{exc}")
+                    finally:
+                        # flash 写入是「用完即放」：成功也要关掉控制口，
+                        # 否则接口被这个进程一直占着，推流和官方软件都打不开。
+                        self._close_control_locked()
+                except Exception as exc:  # 编码/上传失败统一转状态栏
+                    failure = exc
+            if failure is not None:
+                self._post("flash_failed", friendly_device_error(failure))
+            else:
+                self._post("flash_done", size, "官方" if vendor else "自定义")
+
+        threading.Thread(target=job, daemon=True, name="hud-flash").start()
+
+    def _set_flash_controls(self, *, enabled: bool) -> None:
+        """写入期间禁掉按钮，避免两次上传交错。"""
+        for name in ("_btn_flash_standby", "_btn_flash_restore"):
+            button = getattr(self, name, None)
+            if button is None:
+                continue
+            try:
+                button.state(["!disabled"] if enabled else ["disabled"])
+            except tk.TclError:
+                pass
+
+    def _apply_flash_progress(self, fraction: float) -> None:
+        progress = getattr(self, "_flash_progress", None)
+        if progress is None:
+            return
+        clamped = max(0.0, min(1.0, fraction))
+        try:
+            progress.configure(value=clamped * 100.0)
+            if self._flash_hint is not None:
+                self._flash_hint.configure(text=f"正在写入 {clamped * 100:.0f}%", fg=ACCENT_2)
+        except tk.TclError:
+            pass
+
+    def _finish_flash_write(self, size: int, error: str = "", kind: str = "") -> None:
+        self._flash_busy = False
+        self._set_flash_controls(enabled=True)
+        progress = getattr(self, "_flash_progress", None)
+        if progress is not None:
+            try:
+                progress.pack_forget()
+                progress.configure(value=0.0)
+            except tk.TclError:
+                pass
+        hint = getattr(self, "_flash_hint", None)
+        if hint is not None:
+            try:
+                if error:
+                    hint.configure(text=f"写入失败：{error}", fg=ERR)
+                else:
+                    hint.configure(
+                        text=f"已写入{kind}待机图 {size:,} 字节 · 关屏再开屏即可看到", fg=OK
+                    )
+            except tk.TclError:
+                pass
+        if error:
+            self._set_status(f"写入待机图失败：{error}", "error")
+        else:
+            self._set_status(f"已写入{kind}待机图（{size:,} 字节）· 关屏再开屏即可看到", "ok")
+
+    # ------------------------------------------------------------------ #
     # 推流
     # ------------------------------------------------------------------ #
     def _is_streaming(self) -> bool:
@@ -5298,6 +5524,12 @@ class App(tk.Tk):
             if self._device_reply is not None:
                 self._device_reply.configure(text=f"设备回复：{payload[0]}")
             self._set_status("设备状态读取成功", "ok")
+        elif kind == "flash_progress":
+            self._apply_flash_progress(float(payload[0]))
+        elif kind == "flash_failed":
+            self._finish_flash_write(0, error=str(payload[0]))
+        elif kind == "flash_done":
+            self._finish_flash_write(int(payload[0]), kind=str(payload[1]))
         elif kind == "rotation":
             try:
                 degrees = int(payload[0]) % 360

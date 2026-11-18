@@ -205,3 +205,54 @@ def test_describe_panel_matches_the_device_table() -> None:
     text = device.describe_panel()
     assert spec.label in text
     assert f"{spec.vendor_id:04X}:{spec.product_id:04X}" in text
+
+
+def test_prepare_flash_image_centre_crops_to_the_panel_square() -> None:
+    """待机图不是推流帧：先居中裁成 480×480，再按 flash 上限（1 MiB）编码。"""
+    wide = Image.new("RGB", (1200, 600), (10, 20, 30))
+    wide.paste((250, 250, 250), (600, 0, 1200, 600))
+
+    payload = device.prepare_flash_image(wide)
+
+    assert payload[:2] == b"\xff\xd8" and payload[-2:] == b"\xff\xd9"
+    assert len(payload) <= device.FLASH_IMAGE_MAX_BYTES
+    decoded = Image.open(__import__("io").BytesIO(payload))
+    assert decoded.size == (device.SCREEN_W, device.SCREEN_H)
+    assert decoded.getpixel((470, 240))[0] > 200  # 右半边保住了，说明是居中裁切
+
+
+def test_flash_image_encoding_keeps_more_detail_than_a_stream_frame() -> None:
+    """flash 图没有 46920 字节的推流上限，所以能用比推流帧更高的质量。"""
+    img = Image.new("RGB", (480, 480))
+    img.putdata(
+        [
+            ((x * 7) % 256, (y * 5) % 256, ((x + y) * 3) % 256)
+            for y in range(480)
+            for x in range(480)
+        ]
+    )
+
+    flash_payload = device.prepare_flash_image(img)
+    stream_payload = device.encode_jpeg(img)
+
+    assert len(flash_payload) <= device.FLASH_IMAGE_MAX_BYTES
+    assert len(flash_payload) > len(stream_payload)
+
+
+def test_prepare_flash_image_accepts_a_path(tmp_path) -> None:
+    path = tmp_path / "standby.png"
+    Image.new("RGB", (480, 480), (200, 30, 30)).save(path)
+
+    payload = device.prepare_flash_image(path)
+
+    assert len(payload) <= device.FLASH_IMAGE_MAX_BYTES
+    assert len(payload) < 20000  # 纯色图不需要很多字节
+
+
+def test_encode_flash_image_reports_a_picture_it_cannot_fit() -> None:
+    with pytest.raises(ValueError, match="cannot fit the picture"):
+        device.encode_flash_image(_noise_image(480), max_bytes=512)
+
+
+def test_flash_image_cap_is_below_the_firmware_ceiling() -> None:
+    assert 0 < device.FLASH_IMAGE_MAX_BYTES < device.FLASH_MAX_BYTES
